@@ -37,7 +37,7 @@ try:
 except ImportError as e:
     print(f"❌ Error importando desde los módulos del SDK: {e}"); exit()
 
-CSV_PATH = r"C:\Users\Ezequiel Tarsitano\Desktop\eventos_tiempo_real.csv"
+CSV_PATH = r"C:\Users\Usuario\Downloads\eventos_tiempo_real.csv"
 CSV_FIELDNAMES = [
     "Timestamp", "EventType", "EventSubType", "DeviceTime", "ChannelID_Evento", "ChannelID_Puerta", "EventID",
     "CardNo", "UserID", "OpenMethod", "Status", "ErrorCode", "CardType",
@@ -169,7 +169,6 @@ user_data_param_init = C_LDWORD(0)
 if not client.InitEx(None, user_data_param_init, init_param_instance):
     print(f"❌ SDK Init Error: {client.GetLastErrorMessage()}"); exit()
 print("✅ SDK Inicializado.")
-
 try:
     file_is_new = not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0
     with open(CSV_PATH, "a", newline='', encoding='utf-8') as f_csv:
