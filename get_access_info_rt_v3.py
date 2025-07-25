@@ -73,13 +73,11 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
         if pAlarmInfo:
             try:
                 access_event = cast(pAlarmInfo, POINTER(DEV_EVENT_ACCESS_CTL_INFO)).contents
-                N = 128
                 info = NET_A_USER_MANAGE_INFO_EX()
-                info.dwSize = sizeof(NET_A_USER_MANAGE_INFO_EX)
-                info.nMaxUserNum = N
-                info.pstuUserInfo = (NET_ACCESS_USER_INFO * N)()
-                user_info = NetClient.QueryUserInfoEx(g_login_id, access_event.szUserID, info, 5000)
-                print(f"    Información del Usuario: {user_info}")  # Imprimir información del usuario si está disponible
+                user_id_str = access_event.szUserID.decode(errors='replace').strip(g_null_term_str)
+                if user_id_str:
+                    user_info_all = NetClient.QueryUserInfoEx(int(user_id_str), info, 5000)
+                    print(f"    Información del Usuario: {user_info_all}")  # Imprimir información del usuario si está disponible
                 event_subtype_name_access = "N/A"
                 if hasattr(access_event, 'emEventType'):
                     try:
@@ -100,7 +98,6 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                 
                 card_no_str = access_event.szCardNo.decode(errors='replace').strip(g_null_term_str)
                 user_name_str = access_event.szCitizenName.decode(errors='replace').strip(g_null_term_str)
-                user_id_str = access_event.szUserID.decode(errors='replace').strip(g_null_term_str)
                 open_method_name = NET_ACCESS_DOOROPEN_METHOD(access_event.emOpenMethod).name if hasattr(NET_ACCESS_DOOROPEN_METHOD(access_event.emOpenMethod), 'name') else str(access_event.emOpenMethod)
                 card_type_name = NET_ACCESSCTLCARD_TYPE(access_event.emCardType).name if hasattr(NET_ACCESSCTLCARD_TYPE(access_event.emCardType), 'name') else str(access_event.emCardType)
                 print(f"    Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
@@ -188,8 +185,8 @@ except IOError as e: print(f"❌ Error CSV: {e}"); client.Cleanup(); exit()
 
 print("🔒 Intentando conectar al dispositivo...")
 in_login = NET_IN_LOGIN_WITH_HIGHLEVEL_SECURITY(); in_login.dwSize = sizeof(in_login)
-in_login.szIP = b"192.168.88.254"; in_login.nPort = 37777
-in_login.szUserName = b"admin"; in_login.szPassword = b"Sebigus123"
+in_login.szIP = b"192.168.88.247"; in_login.nPort = 37777
+in_login.szUserName = b"ezequiel"; in_login.szPassword = b"Eze2025*"
 in_login.emSpecCap = EM_LOGIN_SPAC_CAP_TYPE.TCP; in_login.pCapParam = None
 out_login = NET_OUT_LOGIN_WITH_HIGHLEVEL_SECURITY(); out_login.dwSize = sizeof(out_login)
 g_login_id, _, error_msg_login = client.LoginWithHighLevelSecurity(in_login, out_login)
