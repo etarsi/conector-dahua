@@ -174,3 +174,4 @@ print("🧹 Limpiando SDK...");
 if not client.Cleanup(): print(f"⚠️ Error al limpiar SDK. Código: {client.GetLastError()} - {client.GetLastErrorMessage()}")
 else: print("✅ SDK Limpiado.")
 print("🏁 Script finalizado.")
+print("🧹 Limpiando SDK...")
