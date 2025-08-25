@@ -32,7 +32,7 @@ try:
     print("INFO: NetClient importado de NetSDK.py")
 
 except ImportError as e:
-    print(f"❌ Error importando SDK: {e}")
+    print(f"Error importando SDK: {e}")
     sys.exit(1)
 
 # =========================
@@ -96,7 +96,7 @@ def write_csv_row(row: dict):
                 writer.writeheader()
             writer.writerow(row)
     except Exception as e:
-        print(f"  Error escribiendo a CSV: {e}")
+        print(f"Error escribiendo a CSV: {e}")
 
 def post_to_odoo(payload: dict):
     if not POST_TO_ODOO:
@@ -110,11 +110,11 @@ def post_to_odoo(payload: dict):
             verify=False
         )
         if resp.status_code == 200:
-            print("✅ Evento enviado a Odoo OK.", resp.json() if resp.text else "")
+            print("Evento enviado a Odoo OK.", resp.json() if resp.text else "")
         else:
-            print(f"⚠️ Odoo respondió {resp.status_code}: {resp.text[:200]}")
+            print(f"Odoo respondió {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        print(f"⚠️ Error enviando a Odoo: {e}")
+        print(f"Error enviando a Odoo: {e}")
 
 def get_devinfo_from_handle(lAnalyzerHandle):
     with MAP_LOCK:
@@ -300,10 +300,10 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     post_to_odoo(payload)
 
             except Exception as e:
-                print("    Error procesando ACCESS_CTL:", e)
+                print("Error procesando ACCESS_CTL:", e)
                 traceback.print_exc()
         else:
-            print("    pAlarmInfo es NULL para ACCESS_CTL")
+            print("pAlarmInfo es NULL para ACCESS_CTL")
 
 # =========================
 # HILO POR DISPOSITIVO
@@ -330,10 +330,10 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
 
             login_id, _, err = client.LoginWithHighLevelSecurity(in_login, out_login)
             if login_id == 0:
-                print(f"❌ Login {ip_str} falló: {err} | {client.GetLastErrorMessage()}")
+                print(f"Login {ip_str} falló: {err} | {client.GetLastErrorMessage()}")
                 time.sleep(3); continue
 
-            print(f"✅ Login OK {ip_str} | LoginID={login_id}")
+            print(f"Login OK {ip_str} | LoginID={login_id}")
 
             # Suscribirse (canal 0; ajusta si tu puerta es otra)
             dwUserCallback = C_LDWORD(12345)
@@ -348,14 +348,14 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
 
             with MAP_LOCK:
                 HANDLE_TO_DEV[int(handle)] = {"ip": ip_str, "login_id": int(login_id)}
-            print(f"📡 Suscripto {ip_str} | Handle={handle}")
+            print(f"Suscripto {ip_str} | Handle={handle}")
 
             # Mantener vivo
             while not stop_event.is_set():
                 time.sleep(1)
 
         except Exception as e:
-            print(f"⚠️ Hilo {ip_str}: {e}")
+            print(f"Hilo {ip_str}: {e}")
 
         finally:
             # Cleanup
@@ -371,20 +371,20 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
                 except: pass
 
             if not stop_event.is_set():
-                print(f"🔁 Reintentando {ip_str} en 3s…")
+                print(f"Reintentando {ip_str} en 3s…")
                 time.sleep(3)
 
 # =========================
 # MAIN
 # =========================
 def main():
-    print("🚀 Inicializando SDK…")
+    print("Inicializando SDK…")
     init_param_instance = NETSDK_INIT_PARAM(); init_param_instance.nThreadNum = 0
     user_data_param_init = C_LDWORD(0)
     if not client.InitEx(None, user_data_param_init, init_param_instance):
-        print(f"❌ SDK Init Error: {client.GetLastErrorMessage()}")
+        print(f"SDK Init Error: {client.GetLastErrorMessage()}")
         sys.exit(1)
-    print("✅ SDK Inicializado.")
+    print("SDK Inicializado.")
 
     # Asegurar CSV con header
     try:
@@ -394,7 +394,7 @@ def main():
             if file_is_new:
                 writer.writeheader()
     except IOError as e:
-        print(f"❌ Error CSV: {e}")
+        print(f"Error CSV: {e}")
         client.Cleanup()
         sys.exit(1)
 
@@ -405,18 +405,18 @@ def main():
         t.start()
         threads.append(t)
 
-    print("⏳ Escuchando eventos de 254/253/252 (Ctrl+C para salir)…")
+    print("Escuchando eventos de 254/253/252 (Ctrl+C para salir)…")
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n🛑 Deteniendo…")
+        print("\n Deteniendo…")
     finally:
         stop_event.set()
         for t in threads:
             t.join(timeout=3)
         client.Cleanup()
-        print("🏁 Listo.")
+        print("Listo.")
 
 if __name__ == "__main__":
     main()

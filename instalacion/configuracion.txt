@@ -1,0 +1,62 @@
+# Ir a la carpeta de NSSM
+cd "C:\Users\Usuario\Downloads\nssm-2.24-101-g897c7ad\nssm-2.24-101-g897c7ad\win64"
+Unblock-File .\nssm.exe
+
+# Variables del servicio
+$svc    = "Script_Lector_SDK"
+$appdir = "C:\proyectos\conector-dahua"
+$script = "$appdir\script_lector_sdk.py"
+$logs   = "$appdir\logs"
+
+# Detectar python.exe real (ajusta si usás venv)
+$py = (& py -3.13 -c "import sys;print(sys.executable)" 2>$null)
+if (-not $py) { $py = "C:\Python313\Python.exe" }
+
+# Comprobaciones básicas
+Write-Host "PYTHON =" $py
+Write-Host "APPDIR =" $appdir
+Write-Host "SCRIPT  =" $script
+Test-Path $py; Test-Path $appdir; Test-Path $script
+New-Item -ItemType Directory -Force -Path $logs | Out-Null
+
+# Borrar cualquier servicio viejo con ese nombre (ignora errores)
+.\nssm.exe stop   $svc  2>$null
+.\nssm.exe remove $svc confirm 2>$null
+
+# INSTALAR (ojo con las comillas del parámetro)
+.\nssm.exe install $svc "$py" "-u `"$script`""
+
+# Ajustes de trabajo, logs y restart
+.\nssm.exe set $svc AppDirectory   "$appdir"
+.\nssm.exe set $svc AppStdout      "$logs\listener.out.log"
+.\nssm.exe set $svc AppStderr      "$logs\listener.err.log"
+.\nssm.exe set $svc AppRotateFiles 0
+.\nssm.exe set $svc AppRotateOnline 0
+.\nssm.exe set $svc AppRotateBytes 0
+.\nssm.exe set $svc AppExit         Default Restart
+.\nssm.exe set $svc AppRestartDelay 5000
+sc.exe config $svc start= delayed-auto
+
+# Ver configuración guardada
+.\nssm.exe dump $svc
+
+
+#start 
+Start-Service $svc
+
+
+
+# 1) Ver qué Python está usando el launcher
+py -0p
+
+# 2) Asegurar pip e instalar requests (en ese Python)
+py -m ensurepip --upgrade
+py -m pip install --upgrade pip
+py -m pip install requests certifi urllib3
+
+# 3) Probar
+cd C:\proyectos\conector-dahua
+py -u .\script_lector_sdk.py
+
+# 4) Verificar qué exe está usando (opcional)
+py -c "import sys,requests; print(sys.executable, requests.__version__)"
