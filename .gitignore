@@ -1,0 +1,8 @@
+# Ignora todas las carpetas __pycache__ en cualquier lugar del proyecto
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+logs/
+*.log

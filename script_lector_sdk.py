@@ -56,7 +56,7 @@ DEVICES = [
 
 # Enviar a tu endpoint (Odoo) — pon en False si no querés enviar
 POST_TO_ODOO = True
-ODOO_URL = "https://test.sebigus.com.ar/hr_enhancement/attendance"
+ODOO_URL = "https://one.sebigus.com.ar/hr_enhancement/attendance"
 
 # Suscribirse sólo a ACCESS_CTL (recomendado) o a todo:
 SUBSCRIBE_TYPES = EM_EVENT_IVS_TYPE.ACCESS_CTL
@@ -210,7 +210,6 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     # --- 1. Obtener el UserID del evento (quien marcó) ---
                     user_id_bytes = access_event.szUserID
                     user_id_str = user_id_bytes.decode(errors='replace').strip('\x00')
-                    print("UserID del que marcó:", user_id_str)
                     # --- 2. Preparar structs de entrada y salida ---
                     in_param = NET_IN_ACCESS_USER_SERVICE_GET()
                     in_param.dwSize = sizeof(NET_IN_ACCESS_USER_SERVICE_GET)
@@ -264,11 +263,6 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     resolved = {"name": "", "id": user_id_str}
                     if dev_login and user_id_str:
                         resolved = resolve_user_info_by_id(dev_login, user_id_str)
-
-                    # Imprimir por consola
-                    print(f"  UserID={user_id_str}  Name={resolved.get('name','')}  Card={card_no_str}  "
-                        f"Method={open_method_name}  Status={'OK' if access_event.bStatus else 'FAIL'}  "
-                        f"SubType={event_subtype_name_access}")
 
                     # Armar log
                     log_data["DeviceTime"]  = format_sdk_time(access_event.UTC)
