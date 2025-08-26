@@ -1,7 +1,8 @@
-import csv, json, os, sys, time, threading, requests
+import json, sys, time, threading, requests
 from ctypes import (POINTER, sizeof, cast, c_void_p, c_int)
 from datetime import datetime
-import traceback
+import traceback, logging
+from logging.handlers import RotatingFileHandler
 
 # =========================
 # IMPORTS DEL SDK (tus módulos)
@@ -15,7 +16,7 @@ try:
         NET_ACCESS_USER_INFO, NET_IN_ACCESS_USER_SERVICE_GET, NET_OUT_ACCESS_USER_SERVICE_GET,
         NET_TIME, NET_TIME_EX
     )
-    print("INFO: Estructuras importadas de SDK_Struct.py")
+    logging.info("INFO: Estructuras importadas de SDK_Struct.py")
 
     from SDK_Enum import (
         EM_LOGIN_SPAC_CAP_TYPE, EM_EVENT_IVS_TYPE,
@@ -23,22 +24,21 @@ try:
         NET_ACCESS_CTL_EVENT_TYPE,
         EM_A_NET_EM_ACCESS_CTL_USER_SERVICE
     )
-    print("INFO: Enums importados de SDK_Enum.py.")
+    logging.info("INFO: Enums importados de SDK_Enum.py.")
 
     from SDK_Callback import fAnalyzerDataCallBack
-    print("INFO: Tipo de Callback fAnalyzerDataCallBack importado.")
+    logging.info("INFO: Tipo de Callback fAnalyzerDataCallBack importado.")
 
     from NetSDK import NetClient
-    print("INFO: NetClient importado de NetSDK.py")
+    logging.info("INFO: NetClient importado de NetSDK.py")
 
 except ImportError as e:
-    print(f"Error importando SDK: {e}")
+    logging.error(f"Error importando SDK: {e}")
     sys.exit(1)
 
 # =========================
 # CONFIG
 # =========================
-CSV_PATH = r"C:\Users\Usuario\Downloads\eventos_tiempo_real.csv"
 CSV_FIELDNAMES = [
     "Timestamp", "DeviceIP", "EventType", "EventSubType", "DeviceTime", "ChannelID_Evento", "ChannelID_Puerta",
     "EventID", "CardNo", "UserID", "UserName", "OpenMethod", "Status", "ErrorCode", "CardType",
@@ -87,17 +87,6 @@ def format_sdk_time(sdk_time_obj):
     except ValueError as e:
         return f"Error Fecha: {e}"
 
-def write_csv_row(row: dict):
-    try:
-        file_exists = os.path.isfile(CSV_PATH)
-        with open(CSV_PATH, "a", newline='', encoding='utf-8') as f_csv:
-            writer = csv.DictWriter(f_csv, fieldnames=CSV_FIELDNAMES)
-            if not file_exists or os.path.getsize(CSV_PATH) == 0:
-                writer.writeheader()
-            writer.writerow(row)
-    except Exception as e:
-        print(f"Error escribiendo a CSV: {e}")
-
 def post_to_odoo(payload: dict):
     if not POST_TO_ODOO:
         return
@@ -110,11 +99,11 @@ def post_to_odoo(payload: dict):
             verify=False
         )
         if resp.status_code == 200:
-            print("Evento enviado a Odoo OK.", resp.json() if resp.text else "")
+            logging.info("Evento enviado a Odoo OK.", resp.json() if resp.text else "")
         else:
-            print(f"Odoo respondió {resp.status_code}: {resp.text[:200]}")
+            logging.warning(f"Odoo respondió {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        print(f"Error enviando a Odoo: {e}")
+        logging.error(f"Error enviando a Odoo: {e}")
 
 def get_devinfo_from_handle(lAnalyzerHandle):
     with MAP_LOCK:
@@ -155,7 +144,7 @@ def resolve_user_info_by_id(login_id: int, user_id_str: str):
             5000
         )
         if not ok:
-            print("OperateAccessUserService(GET) falló:", client.GetLastErrorMessage())
+            logging.error("OperateAccessUserService(GET) falló: %s", client.GetLastErrorMessage())
             return {"name": "", "id": user_id_str}
 
         # OJO: algunos equipos no devuelven nMaxRetNum real aquí; tomamos el primer slot
@@ -173,7 +162,7 @@ def resolve_user_info_by_id(login_id: int, user_id_str: str):
 
         return {"name": name, "id": back_id or user_id_str}
     except Exception as e:
-        print("Excepción resolviendo usuario:", e)
+        logging.error("Excepción resolviendo usuario: %s", e)
         return {"name": "", "id": user_id_str}
 
 # =========================
@@ -190,7 +179,7 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
     except ValueError:
         event_type_name = f"Desconocido (0x{dwAlarmType:X})"
 
-    print(f"\n[Evento desde {dev_ip}] Handle={lAnalyzerHandle}  Tipo={event_type_name} ({dwAlarmType})")
+    logging.info(f"\n[Evento desde {dev_ip}] Handle={lAnalyzerHandle}  Tipo={event_type_name} ({dwAlarmType})")
 
     # Base de log
     log_data = {key: "" for key in CSV_FIELDNAMES}
@@ -203,9 +192,6 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
         if pAlarmInfo:
             try:
                 access_event = cast(pAlarmInfo, POINTER(DEV_EVENT_ACCESS_CTL_INFO)).contents
-                print("  Procesando ACCESS_CTL evento...")
-                print(f"  Evento ID: {access_event.nEventID}, Canal: {access_event.nChannelID}, "
-                      f"Estado: {'OK' if access_event.bStatus else 'Fallo'}, Error: {access_event.nErrorCode}")
                 if access_event.bStatus:
                     # --- 1. Obtener el UserID del evento (quien marcó) ---
                     user_id_bytes = access_event.szUserID
@@ -263,7 +249,6 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     resolved = {"name": "", "id": user_id_str}
                     if dev_login and user_id_str:
                         resolved = resolve_user_info_by_id(dev_login, user_id_str)
-
                     # Armar log
                     log_data["DeviceTime"]  = format_sdk_time(access_event.UTC)
                     log_data["EventID"]     = access_event.nEventID
@@ -274,9 +259,6 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     log_data["Status"]      = 'Exito' if access_event.bStatus else 'Fallo'
                     log_data["ErrorCode"]   = access_event.nErrorCode if not access_event.bStatus else 0
                     log_data["CardType"]    = card_type_name
-
-                    # CSV
-                    write_csv_row(log_data)
                     # POST (opcional)
                     payload = {
                         "check_time": log_data["Timestamp"],
@@ -294,10 +276,10 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     post_to_odoo(payload)
 
             except Exception as e:
-                print("Error procesando ACCESS_CTL:", e)
+                logging.error("Error procesando ACCESS_CTL:", e)
                 traceback.print_exc()
         else:
-            print("pAlarmInfo es NULL para ACCESS_CTL")
+            logging.error("pAlarmInfo es NULL para ACCESS_CTL")
 
 # =========================
 # HILO POR DISPOSITIVO
@@ -306,7 +288,6 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
     # Definir argtypes/restype una vez aquí (por si el hilo arranca primero)
     client.sdk.CLIENT_RealLoadPictureEx.argtypes = [C_LLONG, c_int, C_DWORD, c_int, fAnalyzerDataCallBack, C_LDWORD, c_void_p]
     client.sdk.CLIENT_RealLoadPictureEx.restype = C_LLONG
-
     client.sdk.CLIENT_StopLoadPic.argtypes = [C_LLONG]
     client.sdk.CLIENT_StopLoadPic.restype = C_BOOL
 
@@ -324,11 +305,10 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
 
             login_id, _, err = client.LoginWithHighLevelSecurity(in_login, out_login)
             if login_id == 0:
-                print(f"Login {ip_str} falló: {err} | {client.GetLastErrorMessage()}")
+                logging.error("Login %s falló: %s | %s", ip_str, err, client.GetLastErrorMessage())
                 time.sleep(3); continue
 
-            print(f"Login OK {ip_str} | LoginID={login_id}")
-
+            logging.info("Login OK %s | LoginID=%d", ip_str, login_id)
             # Suscribirse (canal 0; ajusta si tu puerta es otra)
             dwUserCallback = C_LDWORD(12345)
             b_need_pic_file = 0
@@ -336,20 +316,20 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
                 C_LLONG(login_id), 0, SUBSCRIBE_TYPES, b_need_pic_file, AnalyzerDataCallBack, dwUserCallback, None
             )
             if handle == 0:
-                print(f"❌ Subscribe {ip_str} falló: {client.GetLastError()} - {client.GetLastErrorMessage()}")
+                logging.error("❌ Subscribe %s falló: %s - %s", ip_str, client.GetLastError(), client.GetLastErrorMessage())
                 client.Logout(C_LLONG(login_id))
                 time.sleep(3); continue
 
             with MAP_LOCK:
                 HANDLE_TO_DEV[int(handle)] = {"ip": ip_str, "login_id": int(login_id)}
-            print(f"Suscripto {ip_str} | Handle={handle}")
+            logging.info("Suscripto %s | Handle=%d", ip_str, handle)
 
             # Mantener vivo
             while not stop_event.is_set():
                 time.sleep(1)
 
         except Exception as e:
-            print(f"Hilo {ip_str}: {e}")
+            logging.error("Hilo %s: %s", ip_str, e)
 
         finally:
             # Cleanup
@@ -365,33 +345,21 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
                 except: pass
 
             if not stop_event.is_set():
-                print(f"Reintentando {ip_str} en 3s…")
+                logging.info("Reintentando %s en 3s…", ip_str)
                 time.sleep(3)
 
 # =========================
 # MAIN
 # =========================
 def main():
-    print("Inicializando SDK…")
+    logging.info("Inicializando SDK…")
     init_param_instance = NETSDK_INIT_PARAM(); init_param_instance.nThreadNum = 0
     user_data_param_init = C_LDWORD(0)
     if not client.InitEx(None, user_data_param_init, init_param_instance):
-        print(f"SDK Init Error: {client.GetLastErrorMessage()}")
-        sys.exit(1)
-    print("SDK Inicializado.")
-
-    # Asegurar CSV con header
-    try:
-        file_is_new = not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0
-        with open(CSV_PATH, "a", newline='', encoding='utf-8') as f_csv:
-            writer = csv.DictWriter(f_csv, fieldnames=CSV_FIELDNAMES)
-            if file_is_new:
-                writer.writeheader()
-    except IOError as e:
-        print(f"Error CSV: {e}")
-        client.Cleanup()
+        logging.error("SDK Init Error: %s", client.GetLastErrorMessage())
         sys.exit(1)
 
+    logging.info("SDK Inicializado.")
     stop_event = threading.Event()
     threads = []
     for dev in DEVICES:
@@ -399,18 +367,18 @@ def main():
         t.start()
         threads.append(t)
 
-    print("Escuchando eventos de 254/253/252 (Ctrl+C para salir)…")
+    logging.info("Escuchando eventos de 254/253/252 (Ctrl+C para salir)…")
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n Deteniendo…")
+        logging.info("Deteniendo…")
     finally:
         stop_event.set()
         for t in threads:
             t.join(timeout=3)
         client.Cleanup()
-        print("Listo.")
+        logging.info("Listo.")
 
 if __name__ == "__main__":
     main()
