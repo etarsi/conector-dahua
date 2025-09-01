@@ -1,4 +1,4 @@
-import json, sys, time, threading, requests
+import json, os, sys, time, threading, requests
 from ctypes import (POINTER, sizeof, cast, c_void_p, c_int)
 from datetime import datetime
 import traceback, logging
@@ -7,6 +7,41 @@ from logging.handlers import RotatingFileHandler
 # =========================
 # IMPORTS DEL SDK (tus módulos)
 # =========================
+
+# Configuracion de logging
+# === Config de logging (consola + archivo rotativo) ===
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+logs_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(logs_dir, exist_ok=True)
+
+formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(threadName)s %(name)s: %(message)s"
+)
+
+root = logging.getLogger()
+root.setLevel(LOG_LEVEL)
+
+# Limpia handlers previos (por si el script se recarga)
+root.handlers.clear()
+
+# -> a archivo rotativo
+file_handler = RotatingFileHandler(
+    os.path.join(logs_dir, "dahua_sdk.log"),
+    maxBytes=5_242_880,  # 5 MB
+    backupCount=5,
+    encoding="utf-8"
+)
+file_handler.setLevel(LOG_LEVEL)
+file_handler.setFormatter(formatter)
+root.addHandler(file_handler)
+
+# -> a consola (stdout) para que NSSM lo capture en listener.out.log
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(LOG_LEVEL)
+console_handler.setFormatter(formatter)
+root.addHandler(console_handler)
+
 try:
     from SDK_Struct import (
         C_DWORD, C_BOOL, C_LLONG, C_ENUM, C_LDWORD,
@@ -99,7 +134,8 @@ def post_to_odoo(payload: dict):
             verify=False
         )
         if resp.status_code == 200:
-            logging.info("Evento enviado a Odoo OK.", resp.json() if resp.text else "")
+            logging.info(f"Evento enviado a Odoo OK. Respuesta: {resp.json() if resp.text else ''}")
+
         else:
             logging.warning(f"Odoo respondió {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
@@ -144,7 +180,7 @@ def resolve_user_info_by_id(login_id: int, user_id_str: str):
             5000
         )
         if not ok:
-            logging.error("OperateAccessUserService(GET) falló: %s", client.GetLastErrorMessage())
+            logging.error(f"OperateAccessUserService(GET) falló: {client.GetLastErrorMessage()}")
             return {"name": "", "id": user_id_str}
 
         # OJO: algunos equipos no devuelven nMaxRetNum real aquí; tomamos el primer slot
@@ -162,7 +198,7 @@ def resolve_user_info_by_id(login_id: int, user_id_str: str):
 
         return {"name": name, "id": back_id or user_id_str}
     except Exception as e:
-        logging.error("Excepción resolviendo usuario: %s", e)
+        logging.error(f"Excepción resolviendo usuario: {e}")
         return {"name": "", "id": user_id_str}
 
 # =========================
@@ -276,7 +312,7 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     post_to_odoo(payload)
 
             except Exception as e:
-                logging.error("Error procesando ACCESS_CTL:", e)
+                logging.error(f"Error procesando ACCESS_CTL: {e}")
                 traceback.print_exc()
         else:
             logging.error("pAlarmInfo es NULL para ACCESS_CTL")
@@ -305,10 +341,10 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
 
             login_id, _, err = client.LoginWithHighLevelSecurity(in_login, out_login)
             if login_id == 0:
-                logging.error("Login %s falló: %s | %s", ip_str, err, client.GetLastErrorMessage())
+                logging.error(f"Login {ip_str} falló: {err} | {client.GetLastErrorMessage()}")
                 time.sleep(3); continue
 
-            logging.info("Login OK %s | LoginID=%d", ip_str, login_id)
+            logging.info(f"Login OK {ip_str} | LoginID={login_id}")
             # Suscribirse (canal 0; ajusta si tu puerta es otra)
             dwUserCallback = C_LDWORD(12345)
             b_need_pic_file = 0
@@ -316,20 +352,20 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
                 C_LLONG(login_id), 0, SUBSCRIBE_TYPES, b_need_pic_file, AnalyzerDataCallBack, dwUserCallback, None
             )
             if handle == 0:
-                logging.error("❌ Subscribe %s falló: %s - %s", ip_str, client.GetLastError(), client.GetLastErrorMessage())
+                logging.error(f"Subscribe {ip_str} falló: {client.GetLastError()} - {client.GetLastErrorMessage()}")
                 client.Logout(C_LLONG(login_id))
                 time.sleep(3); continue
 
             with MAP_LOCK:
                 HANDLE_TO_DEV[int(handle)] = {"ip": ip_str, "login_id": int(login_id)}
-            logging.info("Suscripto %s | Handle=%d", ip_str, handle)
+            logging.info(f"Suscripto {ip_str} | Handle={handle}")
 
             # Mantener vivo
             while not stop_event.is_set():
                 time.sleep(1)
 
         except Exception as e:
-            logging.error("Hilo %s: %s", ip_str, e)
+            logging.error(f"Hilo {ip_str}: {e}")
 
         finally:
             # Cleanup
@@ -345,7 +381,7 @@ def login_and_subscribe_loop(dev: dict, stop_event: threading.Event):
                 except: pass
 
             if not stop_event.is_set():
-                logging.info("Reintentando %s en 3s…", ip_str)
+                logging.info(f"Reintentando {ip_str} en 3s…")
                 time.sleep(3)
 
 # =========================
@@ -356,7 +392,7 @@ def main():
     init_param_instance = NETSDK_INIT_PARAM(); init_param_instance.nThreadNum = 0
     user_data_param_init = C_LDWORD(0)
     if not client.InitEx(None, user_data_param_init, init_param_instance):
-        logging.error("SDK Init Error: %s", client.GetLastErrorMessage())
+        logging.error(f"SDK Init Error: {client.GetLastErrorMessage()}")
         sys.exit(1)
 
     logging.info("SDK Inicializado.")
