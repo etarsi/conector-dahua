@@ -173,7 +173,7 @@ def resolve_user_info_by_id(login_id: int, user_id_str: str):
         out_param.pFailCode = cast(fail_code_array, POINTER(C_ENUM))
 
         ok = client.OperateAccessUserService(
-            C_LLONG(login_id),
+            int(login_id),
             EM_A_NET_EM_ACCESS_CTL_USER_SERVICE.NET_EM_ACCESS_CTL_USER_SERVICE_GET,
             in_param,
             out_param,
