@@ -404,8 +404,17 @@ def main():
         threads.append(t)
 
     logging.info("Escuchando eventos de 254/253/252 (Ctrl+C para salir)…")
+    # --- Latido cada 30 minutos ---
+    last_heartbeat = time.time()
     try:
         while True:
+            # Si pasaron 1800 segundos (30 min), logueamos el latido
+            if time.time() - last_heartbeat >= 1800:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logging.info("-------------------------------")
+                logging.info(f"Servicio activo a las {now}")
+                logging.info("-------------------------------")
+                last_heartbeat = time.time()
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Deteniendo…")
