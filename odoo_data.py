@@ -1,13 +1,18 @@
-import requests
 
-url = "https://test.sebigus.com.ar/hr_enhancement/attendance"
-payload = {
-    "dni": "96430726",
-    "name": "Robert Brian Maldonado",
-    "check_time": "2025-08-15 07:18:50.901",
-    "openMethod": "FINGERPRINT"
-}
-r = requests.post(url, json=payload, timeout=10, verify=False) 
-print(r.json())           # {'jsonrpc': '2.0', 'id': None, 'result': {...}}
-res = r.json().get('result', {})
-print(res.get('success'), res.get('message') or res.get('error'))
+import xmlrpc.client
+
+URL = "https://one.sebigus.com.ar"
+DB = "one"
+USER = "rrhh@sebigus.com.ar"
+API_KEY = "123"
+
+common = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/common")
+uid = common.authenticate(DB, USER, API_KEY, {})
+assert uid, "Autenticación falló"
+models = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/object")
+print("UID:", uid)
+print("api model exists:", models.execute_kw(DB, uid, API_KEY, 'ir.model', 'search', [[('model','=','hr.enhancement.api')]]))
+print("api read right?:", models.execute_kw(DB, uid, API_KEY, 'hr.enhancement.api', 'check_access_rights', ['read'], {'raise_exception': False}))
+payload = {"dni":"12345678","name":"Juan","check_time":"2025-10-03 08:15:00","openMethod":"FINGERPRINT"}
+res = models.execute_kw(DB, uid, API_KEY, 'hr.enhancement.api', 'attendance_webhook', [payload], {})
+print(res)

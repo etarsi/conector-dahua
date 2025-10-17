@@ -1,8 +1,12 @@
 import json, os, sys, time, threading, requests
+import io
 from ctypes import (POINTER, sizeof, cast, c_void_p, c_int)
 from datetime import datetime
 import traceback, logging
 from logging.handlers import RotatingFileHandler
+import xmlrpc.client
+import unicodedata
+
 
 # =========================
 # IMPORTS DEL SDK (tus módulos)
@@ -84,14 +88,18 @@ if "ChannelID_Puerta" not in CSV_FIELDNAMES:
 
 # Equipos a escuchar en paralelo:
 DEVICES = [
-    {"ip": b"192.168.88.254", "port": 37777, "user": b"admin", "pwd": b"Sebigus123"},
-    {"ip": b"192.168.88.253", "port": 37777, "user": b"admin", "pwd": b"Sebigus123"},
-    {"ip": b"192.168.88.252", "port": 37777, "user": b"admin", "pwd": b"Sebigus123"},
+    {"ip": b"192.168.88.254", "port": 37777, "user": b"admin", "pwd": b"Sebigus2025*$"},
+    {"ip": b"192.168.88.253", "port": 37777, "user": b"admin", "pwd": b"Sebigus2025*$"},
+    {"ip": b"192.168.88.252", "port": 37777, "user": b"admin", "pwd": b"Sebigus2025*$"},
+    {"ip": b"192.168.88.251", "port": 37777, "user": b"robert", "pwd": b"Robert2025+"},
 ]
 
 # Enviar a tu endpoint (Odoo) — pon en False si no querés enviar
 POST_TO_ODOO = True
-ODOO_URL = "https://one.sebigus.com.ar/hr_enhancement/attendance"
+URL = "https://one.sebigus.com.ar"
+DB = "one"
+USER = "rrhh@sebigus.com.ar"
+API_KEY = "123"
 
 # Suscribirse sólo a ACCESS_CTL (recomendado) o a todo:
 SUBSCRIBE_TYPES = EM_EVENT_IVS_TYPE.ACCESS_CTL
@@ -122,20 +130,28 @@ def format_sdk_time(sdk_time_obj):
     except ValueError as e:
         return f"Error Fecha: {e}"
 
+def strip_accents(s):
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
+def to_ascii_simple(s):
+    s = strip_accents(s)
+    return s.encode("ascii", "ignore").decode("ascii")
+
+
 def post_to_odoo(payload: dict):
     if not POST_TO_ODOO:
         return
     try:
-        resp = requests.post(
-            ODOO_URL,
-            data=json.dumps(payload),
-            headers={"Content-Type": "application/json"},
-            timeout=10,
-            verify=False
-        )
+        common = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/common")
+        uid = common.authenticate(DB, USER, API_KEY, {})
+        assert uid, "Autenticación falló"
+        models = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/object")
+        logging.info(f"UID: {uid}")
+        resp = models.execute_kw(DB, uid, API_KEY, 'hr.enhancement.api', 'attendance_webhook', [payload], {})
+        logging.info(resp)
         if resp.status_code == 200:
             logging.info(f"Evento enviado a Odoo OK. Respuesta: {resp.json() if resp.text else ''}")
-
         else:
             logging.warning(f"Odoo respondió {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
@@ -256,6 +272,7 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     # --- 4. Procesar respuesta ---
                     if liste_user and out_param.nMaxRetNum > 0:
                         personal = user_info_array[0]
+                        logging.info(f"personal data {personal}")
                     # Subtipo
                     try:
                         event_subtype_name_access = NET_ACCESS_CTL_EVENT_TYPE(access_event.emEventType).name
@@ -283,6 +300,7 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
 
                     # Resolver nombre de la persona (si el equipo lo soporta)
                     resolved = {"name": "", "id": user_id_str}
+                    personal_name = personal.szName.decode(errors='replace').strip('\x00') if personal else resolved.get("name", "")
                     if dev_login and user_id_str:
                         resolved = resolve_user_info_by_id(dev_login, user_id_str)
                     # Armar log
@@ -290,7 +308,7 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     log_data["EventID"]     = access_event.nEventID
                     log_data["CardNo"]      = card_no_str
                     log_data["UserID"]      = resolved.get("id", user_id_str)
-                    log_data["UserName"]    = personal.szName.decode(errors='replace').strip('\x00') if personal else resolved.get("name", "")
+                    log_data["UserName"]    = to_ascii_simple(personal_name)
                     log_data["OpenMethod"]  = open_method_name
                     log_data["Status"]      = 'Exito' if access_event.bStatus else 'Fallo'
                     log_data["ErrorCode"]   = access_event.nErrorCode if not access_event.bStatus else 0
