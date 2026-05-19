@@ -13,6 +13,6 @@ models = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/object")
 print("UID:", uid)
 print("api model exists:", models.execute_kw(DB, uid, API_KEY, 'ir.model', 'search', [[('model','=','hr.enhancement.api')]]))
 print("api read right?:", models.execute_kw(DB, uid, API_KEY, 'hr.enhancement.api', 'check_access_rights', ['read'], {'raise_exception': False}))
-payload = {"dni":"12345678","name":"Juan","check_time":"2025-10-03 08:15:00","openMethod":"FINGERPRINT"}
+payload = {"dni":"96175064","name":"Niño Blanco Samuel Isaac","check_time":"2026-04-23 06:55:00","openMethod":"FACE_RECOGNITION"}
 res = models.execute_kw(DB, uid, API_KEY, 'hr.enhancement.api', 'attendance_webhook', [payload], {})
 print(res)

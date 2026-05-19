@@ -91,10 +91,11 @@ DEVICES = [
     {"ip": b"192.168.88.254", "port": 37777, "user": b"admin", "pwd": b"Sebigus2025*$"},
     {"ip": b"192.168.88.253", "port": 37777, "user": b"admin", "pwd": b"Sebigus2025*$"},
     {"ip": b"192.168.88.252", "port": 37777, "user": b"admin", "pwd": b"Sebigus2025*$"},
-    {"ip": b"192.168.88.251", "port": 37777, "user": b"robert", "pwd": b"Robert2025+"},
+    {"ip": b"192.168.88.245", "port": 37777, "user": b"admin", "pwd": b"Sebigus2025*$"},
 ]
 
 # Enviar a tu endpoint (Odoo) — pon en False si no querés enviar
+# Apa, te encontré usando esto Tito (Lauta)
 POST_TO_ODOO = True
 URL = "https://one.sebigus.com.ar"
 DB = "one"
