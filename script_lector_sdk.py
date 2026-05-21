@@ -1,16 +1,10 @@
-import json, os, sys, time, threading, requests
-import io
+import json, os, sys, time, threading, requests, sqlite3, unicodedata, io, traceback, logging, xmlrpc.client 
 from ctypes import (POINTER, sizeof, cast, c_void_p, c_int)
-from datetime import datetime
-import traceback, logging
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
-import xmlrpc.client
-import unicodedata
 
 
-# =========================
-# IMPORTS DEL SDK (tus módulos)
-# =========================
+
 
 # Configuracion de logging
 # === Config de logging (consola + archivo rotativo) ===
@@ -23,10 +17,9 @@ formatter = logging.Formatter(
     "%(asctime)s [%(levelname)s] %(threadName)s %(name)s: %(message)s"
 )
 
+# Limpia handlers previos (por si el script se recarga)
 root = logging.getLogger()
 root.setLevel(LOG_LEVEL)
-
-# Limpia handlers previos (por si el script se recarga)
 root.handlers.clear()
 
 # -> a archivo rotativo
@@ -39,8 +32,6 @@ file_handler = RotatingFileHandler(
 file_handler.setLevel(LOG_LEVEL)
 file_handler.setFormatter(formatter)
 root.addHandler(file_handler)
-
-# -> a consola (stdout) para que NSSM lo capture en listener.out.log
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(LOG_LEVEL)
 console_handler.setFormatter(formatter)
@@ -107,6 +98,19 @@ SUBSCRIBE_TYPES = EM_EVENT_IVS_TYPE.ACCESS_CTL
 # Si querés probar todo: SUBSCRIBE_TYPES = EM_EVENT_IVS_TYPE.ALL
 
 # =========================
+# BACKUP LOCAL SQLITE
+# =========================
+data_dir = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(data_dir, exist_ok=True)
+
+SQLITE_DB_PATH = os.path.join(data_dir, "attendance_backup.sqlite3")
+DB_LOCK = threading.Lock()
+
+# Ventana para considerar que las marcas pertenecen a la misma asistencia
+# Sirve para turno día y turno noche.
+ATTENDANCE_WINDOW_HOURS = 18
+
+# =========================
 # CLIENTE SDK + ESTADO
 # =========================
 client = NetClient()
@@ -120,6 +124,78 @@ g_null_term_str = b'\x00'.decode()
 # =========================
 # UTILS
 # =========================
+
+def get_db_connection():
+    conn = sqlite3.connect(SQLITE_DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_attendance_backup_db():
+    with DB_LOCK:
+        conn = get_db_connection()
+        try:
+            cr = conn.cursor()
+            cr.execute("""
+                CREATE TABLE IF NOT EXISTS hr_attendance_backup (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    -- En vez de employee_id
+                    dni TEXT NOT NULL,
+                    employee_name TEXT,
+
+                    -- Igual concepto que hr.attendance
+                    check_in TEXT NOT NULL,
+                    check_out TEXT,
+
+                    -- Datos del lector
+                    device_ip TEXT,
+                    event_id TEXT,
+                    event_type TEXT,
+                    event_subtype TEXT,
+                    open_method TEXT,
+                    status TEXT,
+                    card_type TEXT,
+
+                    -- Control de envío a Odoo
+                    sent_to_odoo INTEGER DEFAULT 0,
+                    sent_at TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    last_error TEXT,
+
+                    -- Payload completo por seguridad
+                    payload_json TEXT,
+
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT
+                )
+            """)
+
+            cr.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hr_attendance_backup_dni_check_in
+                ON hr_attendance_backup (dni, check_in)
+            """)
+
+            cr.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hr_attendance_backup_sent
+                ON hr_attendance_backup (sent_to_odoo)
+            """)
+
+            conn.commit()
+            logging.info(f"Backup SQLite inicializado: {SQLITE_DB_PATH}")
+
+        finally:
+            conn.close()
+
+def normalize_datetime_str(dt_str):
+    """
+    Deja la fecha en formato YYYY-MM-DD HH:MM:SS.
+    Si viene con milisegundos, los corta.
+    """
+    if not dt_str:
+        return None
+    return str(dt_str)[:19]
+
 def format_sdk_time(sdk_time_obj):
     if not sdk_time_obj or int(sdk_time_obj.dwYear) == 0:
         return "Fecha/Hora Inválida"
@@ -328,6 +404,23 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                         "cardType": log_data["CardType"],
                         "deviceIp": dev_ip
                     }
+                    payload_backup = {
+                        "check_time": log_data["DeviceTime"],
+                        "received_at": log_data["Timestamp"],
+                        "EventType": log_data["EventType"],
+                        "eventSubType": log_data["EventSubType"],
+                        "deviceTime": log_data["DeviceTime"],
+                        "eventId": log_data["EventID"],
+                        "dni": log_data["UserID"],
+                        "name": log_data["UserName"],
+                        "openMethod": log_data["OpenMethod"],
+                        "status": log_data["Status"],
+                        "cardType": log_data["CardType"],
+                        "deviceIp": dev_ip
+                    }
+                    # Primero backup local
+                    save_hr_attendance_backup(payload_backup)
+                    # Envio a Odoo
                     post_to_odoo(payload)
 
             except Exception as e:
@@ -335,6 +428,153 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                 traceback.print_exc()
         else:
             logging.error("pAlarmInfo es NULL para ACCESS_CTL")
+
+
+def save_hr_attendance_backup(payload: dict):
+    """
+    Guarda la asistencia localmente con lógica parecida a hr.attendance.
+
+    Regla:
+    - Si no existe una asistencia reciente para ese DNI, crea check_in.
+    - Si existe una asistencia reciente dentro de ATTENDANCE_WINDOW_HOURS,
+      actualiza check_out con la última marca.
+    """
+
+    dni = payload.get("dni")
+    employee_name = payload.get("name")
+    check_time = normalize_datetime_str(
+        payload.get("check_time") or payload.get("deviceTime")
+    )
+
+    if not dni or not check_time:
+        logging.warning(f"No se guarda backup: falta dni o check_time. Payload={payload}")
+        return
+
+    try:
+        mark_dt = datetime.strptime(check_time, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        logging.warning(f"Fecha inválida para backup: {check_time}. Payload={payload}")
+        return
+
+    min_check_in_dt = mark_dt - timedelta(hours=ATTENDANCE_WINDOW_HOURS)
+    min_check_in = min_check_in_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with DB_LOCK:
+        conn = get_db_connection()
+        try:
+            cr = conn.cursor()
+
+            # Buscar última asistencia del DNI dentro de la ventana
+            existing = cr.execute("""
+                SELECT id, check_in, check_out
+                FROM hr_attendance_backup
+                WHERE dni = ?
+                  AND check_in >= ?
+                  AND check_in <= ?
+                ORDER BY check_in DESC
+                LIMIT 1
+            """, (
+                dni,
+                min_check_in,
+                check_time,
+            )).fetchone()
+
+            if not existing:
+                # Primera marca: crear check_in
+                cr.execute("""
+                    INSERT INTO hr_attendance_backup (
+                        dni,
+                        employee_name,
+                        check_in,
+                        check_out,
+
+                        device_ip,
+                        event_id,
+                        event_type,
+                        event_subtype,
+                        open_method,
+                        status,
+                        card_type,
+
+                        payload_json,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    dni,
+                    employee_name,
+                    check_time,
+                    None,
+
+                    payload.get("deviceIp"),
+                    str(payload.get("eventId")),
+                    payload.get("EventType"),
+                    payload.get("eventSubType"),
+                    payload.get("openMethod"),
+                    payload.get("status"),
+                    payload.get("cardType"),
+
+                    payload_json,
+                    now,
+                ))
+
+                logging.info(
+                    f"Backup creado CHECK_IN | DNI={dni} | check_in={check_time} | equipo={payload.get('deviceIp')}"
+                )
+
+            else:
+                attendance_id = existing["id"]
+                current_check_in = existing["check_in"]
+
+                # Si la marca es igual al check_in, no tiene sentido actualizar check_out
+                if check_time == current_check_in:
+                    logging.info(
+                        f"Marca duplicada ignorada | DNI={dni} | check_time={check_time}"
+                    )
+                else:
+                    # Siguiente marca: actualizar check_out
+                    cr.execute("""
+                        UPDATE hr_attendance_backup
+                        SET check_out = ?,
+                            employee_name = COALESCE(?, employee_name),
+                            device_ip = ?,
+                            event_id = ?,
+                            event_type = ?,
+                            event_subtype = ?,
+                            open_method = ?,
+                            status = ?,
+                            card_type = ?,
+                            payload_json = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                    """, (
+                        check_time,
+                        employee_name,
+                        payload.get("deviceIp"),
+                        str(payload.get("eventId")),
+                        payload.get("EventType"),
+                        payload.get("eventSubType"),
+                        payload.get("openMethod"),
+                        payload.get("status"),
+                        payload.get("cardType"),
+                        payload_json,
+                        now,
+                        attendance_id,
+                    ))
+
+                    logging.info(
+                        f"Backup actualizado CHECK_OUT | DNI={dni} | check_out={check_time} | asistencia_id={attendance_id}"
+                    )
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logging.exception("Error guardando backup local de asistencia")
+        finally:
+            conn.close()
 
 # =========================
 # HILO POR DISPOSITIVO
@@ -417,6 +657,7 @@ def main():
     logging.info("SDK Inicializado.")
     stop_event = threading.Event()
     threads = []
+    init_attendance_backup_db()
     for dev in DEVICES:
         t = threading.Thread(target=login_and_subscribe_loop, args=(dev, stop_event), daemon=True)
         t.start()
