@@ -60,3 +60,68 @@ py -u .\script_lector_sdk.py
 
 # 4) Verificar qué exe está usando (opcional)
 py -c "import sys,requests; print(sys.executable, requests.__version__)"
+
+# ==========================================================
+# CONFIGURACION DEL CONECTOR (config.json)
+# ==========================================================
+# Las IPs, usuarios, contrasenas y los datos de Odoo YA NO ESTAN EN EL SCRIPT.
+# Se leen de config.json, que esta junto a script_lector_sdk.py y NO se sube a git.
+#
+# Si es una instalacion nueva:
+#   copy config.example.json config.json
+#   notepad config.json      # completar passwords / api_key
+#
+# Tambien se pueden pisar por variables de entorno (utiles para NSSM):
+#   ODOO_URL, ODOO_DB, ODOO_USER, ODOO_API_KEY, LOG_LEVEL
+#   .\nssm.exe set Script_Lector_SDK AppEnvironmentExtra ODOO_API_KEY=xxxx
+#
+# Ya no hace falta instalar 'requests': el envio a Odoo usa xmlrpc (stdlib).
+
+# --- Consultar eventos pendientes de enviar a Odoo ---
+# py -c "import sqlite3;c=sqlite3.connect(r'C:\proyectos\conector-dahua\data\attendance_backup.sqlite3');print(c.execute('select count(*) from attendance_events where sent_to_odoo=0').fetchone())"
+#
+# sent_to_odoo: 0 = pendiente, 1 = enviado OK, 2 = descartado (Odoo lo rechazo varias veces)
+
+
+# ==========================================================
+# LOS 3 PROBLEMAS DE PRODUCCION Y COMO QUEDARON RESUELTOS
+# ==========================================================
+#
+# 1) CORTE DE LUZ DEL SERVIDOR (los lectores siguen andando)
+#    Al conectarse a cada lector, el script le pide las marcas que quedaron
+#    guardadas en su memoria interna desde la ultima que tenemos. Tambien lo
+#    repite en cada reconexion. Nada se pierde aunque el servidor este apagado
+#    horas o dias.
+#    Se controla con la seccion "backfill" de config.json:
+#      days_on_first_run : cuanto mirar hacia atras la primera vez (base vacia)
+#      max_days          : tope hacia atras en cualquier recuperacion
+#      overlap_minutes   : margen que se relee antes de la ultima marca conocida
+#    Las marcas repetidas se descartan solas (UNIQUE equipo+dni+hora), asi que
+#    reiniciar el servicio las veces que haga falta NUNCA duplica asistencias.
+#    Recomendado igual: poner el servidor en un UPS, aunque sea chico.
+#
+# 2) SERVICIO DE WINDOWS
+#    instalacion\instalar_servicio.ps1 lo instala o reconfigura con:
+#      - arranque automatico retrasado
+#      - reinicio automatico ante cualquier salida o falla (NSSM + sc failure)
+#      - rotacion de logs a 10 MB (antes listener.out.log crecia sin limite)
+#      - parada limpia con Ctrl+C
+#    Ejecutar como Administrador:
+#      powershell -ExecutionPolicy Bypass -File .\instalacion\instalar_servicio.ps1
+#
+# 3) EL SERVICIO SE CUELGA
+#    Tres capas:
+#    a) Dentro del script: un watchdog revisa cada 30 s que el hilo principal
+#       responda, que el worker de eventos avance y que los lectores esten
+#       conectados. Si algo se trabo, escribe el motivo en el log y sale con
+#       codigo 2 para que el servicio lo levante de nuevo.
+#    b) NSSM reinicia el proceso ante esa salida.
+#    c) Vigilancia externa por si el proceso queda congelado del todo:
+#       el script escribe logs\estado.json cada 30 s; la tarea programada
+#       revisa que no este viejo y, si lo esta, reinicia el servicio.
+#       Instalarla una sola vez, como Administrador:
+#         powershell -ExecutionPolicy Bypass -File .\instalacion\vigilar_servicio.ps1 -Instalar
+#       Ver el registro de la vigilancia: logs\vigilancia.log
+#
+# --- Ver el estado actual del conector de un vistazo ---
+#   Get-Content C:\proyectos\conector-dahua\logs\estado.json | ConvertFrom-Json

@@ -1,0 +1,69 @@
+{
+  "log_level": "INFO",
+  "devices": [
+    {
+      "ip": "192.168.88.254",
+      "port": 37777,
+      "user": "admin",
+      "password": "CAMBIAR"
+    },
+    {
+      "ip": "192.168.88.253",
+      "port": 37777,
+      "user": "admin",
+      "password": "CAMBIAR"
+    },
+    {
+      "ip": "192.168.88.252",
+      "port": 37777,
+      "user": "admin",
+      "password": "CAMBIAR"
+    },
+    {
+      "ip": "192.168.88.245",
+      "port": 37777,
+      "user": "admin",
+      "password": "CAMBIAR"
+    }
+  ],
+  "odoo": {
+    "enabled": true,
+    "url": "https://one.sebigus.com.ar",
+    "db": "one",
+    "user": "rrhh@sebigus.com.ar",
+    "api_key": "CAMBIAR",
+    "model": "hr.enhancement.api",
+    "method": "attendance_webhook",
+    "timeout_seconds": 20,
+    "verify_ssl": true,
+    "max_app_retries": 5
+  },
+  "device_time_is_utc": true,
+  "attendance_window_hours": 18,
+  "normalize_name_ascii": true,
+  "user_cache_minutes": 60,
+  "resend_interval_seconds": 60,
+  "heartbeat_minutes": 30,
+  "reconnect_seconds": 5,
+  "sdk_query_timeout_ms": 5000,
+  "log_denied_events": true,
+  "clock_drift_warn_minutes": 10,
+  "backfill": {
+    "enabled": true,
+    "days_on_first_run": 1,
+    "overlap_minutes": 15,
+    "max_days": 30,
+    "page_size": 200,
+    "max_records": 50000,
+    "on_reconnect": true,
+    "record_time_offset_minutes": 0
+  },
+  "watchdog": {
+    "enabled": true,
+    "check_seconds": 30,
+    "main_stall_seconds": 180,
+    "worker_stall_seconds": 300,
+    "all_devices_down_minutes": 15,
+    "status_file": "logs/estado.json"
+  }
+}
