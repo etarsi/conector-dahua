@@ -635,14 +635,44 @@ class NetClient(metaclass=Singleton):
             13: '客户端IP地址没有登录权限',
             18: '设备账号未初始化，无法登陆'
         }
+        # Traduccion de los codigos que mas se ven, para que el log sirva sin
+        # tener que buscar el chino. El texto original queda al lado.
+        login_error_es = {
+            1: 'usuario o contrasena incorrectos',
+            2: 'el usuario no existe',
+            3: 'timeout de login',
+            4: 'login duplicado',
+            5: 'cuenta bloqueada',
+            6: 'cuenta en lista de prohibidos',
+            7: 'equipo ocupado, sin recursos',
+            8: 'fallo la subconexion',
+            9: 'fallo la conexion principal',
+            10: 'se supero el maximo de conexiones del equipo',
+            11: 'solo admite protocolo de 3a generacion',
+            12: 'falta la llave U o es incorrecta',
+            13: 'esta IP no tiene permiso de login en el equipo',
+            18: 'la cuenta del equipo no esta inicializada',
+        }
         error_message = ''
         device_info = NET_DEVICEINFO_Ex()
         if login_id == 0:
+            codigo = stuOutParam.nError
             try:
-                error_message = login_error[stuOutParam.nError]
+                error_message = login_error[codigo]
             except KeyError:
                 error_message = 'There is no such error code'
-            print(error_message)
+            # Los mensajes del SDK vienen en chino y la salida estandar de un
+            # servicio en Windows suele ser cp1252: imprimirlos de una lanzaba
+            # UnicodeEncodeError, que se propagaba y mataba el hilo del lector
+            # antes de devolver el error. Resultado: no se veia por que fallaba
+            # el login y el equipo quedaba reintentando para siempre.
+            detalle = login_error_es.get(codigo, 'codigo desconocido')
+            try:
+                print(f'[NetSDK] login fallido, codigo {codigo}: {detalle} ({error_message})')
+            except UnicodeEncodeError:
+                print(f'[NetSDK] login fallido, codigo {codigo}: {detalle}')
+            # Se devuelve el texto en español para que quede legible en el log.
+            error_message = f'codigo {codigo}: {detalle}'
         else:
             device_info = stuOutParam.stuDeviceInfo
         return login_id, device_info, error_message
