@@ -11,3 +11,6 @@ data/
 
 # Paquetes del SDK de Dahua (181 MB): son referencia, no codigo del proyecto
 General_NetSDK_*/
+
+# Paquete temporal para mover al servidor: lleva config.json con la api key
+_para_el_servidor/

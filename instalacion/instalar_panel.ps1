@@ -1,24 +1,24 @@
 <#
-    Deja corriendo en ESTE servidor (192.168.1.100) las dos piezas de RRHH:
+    Deja corriendo en ESTE servidor las dos piezas de RRHH:
 
         1. el panel de personas          -> http://panel.control.rrhh
         2. el conector de Lavalle        -> manda las marcas del ZKTeco a Odoo
 
     y publica el nombre en el servidor DNS de esta misma maquina.
 
-    Ejecutar EN LA .100, como Administrador:
-        powershell -ExecutionPolicy Bypass -File C:\proyectos\conector-dahua\instalacion\instalar_panel_en_100.ps1
+    Ejecutar EN EL SERVIDOR, como Administrador:
+        powershell -ExecutionPolicy Bypass -File C:\proyectos\conector-dahua\instalacion\instalar_panel.ps1
 
     Que hace, en orden:
       1. comprueba Python, pyzk y que los scripts compilen
       2. comprueba que el puerto 80 este libre (ojo con IIS)
       3. abre el 80 en el firewall, solo para la red interna
       4. registra las dos tareas al arranque, corriendo como SYSTEM
-      5. crea la zona DNS control.rrhh con el registro panel -> 192.168.1.100
+      5. crea la zona DNS control.rrhh apuntando a este mismo servidor
       6. las arranca y verifica
 
     No reinicia el servidor ni toca PostgreSQL, Veeam ni IIS.
-    Para volver atras todo:  .\instalar_panel_en_100.ps1 -Desinstalar
+    Para volver atras todo:  .\instalar_panel.ps1 -Desinstalar
 
     Se verifico que el panel y el conector pueden hablarle al mismo lector
     ZKTeco al mismo tiempo sin pisarse, asi que conviven bien en esta maquina.
@@ -29,7 +29,7 @@ param(
     [string]$TareaLav    = "Conector Lavalle",
     [string]$Zona        = "control.rrhh",
     [string]$Nombre      = "panel",          # ojo: $Host es variable reservada de PowerShell
-    [string]$Ip          = "192.168.1.100",
+    [string]$Ip          = "",           # vacio = se detecta la IP de este servidor
     [int]$Puerto         = 80,
     [switch]$SinDns,
     [switch]$SinLavalle,
@@ -47,6 +47,21 @@ function Malo($t)   { Write-Host "  FALLA $t" -ForegroundColor Red }
 $yo = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $yo.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Hay que ejecutarlo como Administrador (boton derecho sobre PowerShell > Ejecutar como administrador)."
+}
+
+# --- IP de este servidor ---
+# Se toma la de la interfaz que sale a la red, no una de loopback ni de un
+# adaptador virtual. Si la maquina tiene varias, conviene pasar -Ip a mano.
+if (-not $Ip) {
+    $candidatas = Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object { $_.IPAddress -notmatch "^(127\.|169\.254\.)" -and $_.PrefixOrigin -ne "WellKnown" } |
+        Select-Object -ExpandProperty IPAddress
+    if (-not $candidatas) { throw "No pude detectar la IP de este servidor. Pasala con -Ip 192.168.x.x" }
+    $Ip = @($candidatas)[0]
+    if (@($candidatas).Count -gt 1) {
+        Write-Host ("  AVISO este servidor tiene varias IPs ({0}); uso {1}. " -f ($candidatas -join ", "), $Ip) -ForegroundColor Yellow
+        Write-Host "        Si no es la correcta, cancelar y correr con -Ip <la que corresponda>" -ForegroundColor Yellow
+    }
 }
 
 $scriptPanel = Join-Path $AppDir "panel_personas.py"
@@ -148,7 +163,7 @@ if ($enUso) {
     Write-Host "  Si es IIS y no lo usan, se libera con:" -ForegroundColor Yellow
     Write-Host "      Stop-Service W3SVC; Set-Service W3SVC -StartupType Disabled" -ForegroundColor Yellow
     Write-Host "  Si IIS SI se usa, correr este script con otro puerto:" -ForegroundColor Yellow
-    Write-Host "      .\instalar_panel_en_100.ps1 -Puerto 8080" -ForegroundColor Yellow
+    Write-Host "      .\instalar_panel.ps1 -Puerto 8080" -ForegroundColor Yellow
     Write-Host "  (con otro puerto la URL queda http://$fqdn`:8080)" -ForegroundColor Yellow
     throw "Puerto $Puerto ocupado. Nada fue modificado."
 }
