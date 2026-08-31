@@ -116,19 +116,45 @@ foreach ($s in @($scriptPanel, $scriptLav)) {
 }
 Ok "estan los dos scripts"
 
+function Invocar-Python {
+    <#
+        Corre python y devuelve @{ ok; salida }.
+
+        Baja ErrorActionPreference a Continue a proposito. En PowerShell 5.1
+        todo lo que un .exe escribe en stderr se convierte en NativeCommandError
+        y, con ErrorActionPreference = Stop, corta el script aunque el programa
+        haya terminado bien. Un "ModuleNotFoundError: zk" en un chequeo que
+        justamente sirve para detectar que falta el modulo no tiene por que
+        voltear la instalacion.
+    #>
+    param([string[]]$Argumentos)
+
+    $previo = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $salida = & $pyExe @Argumentos 2>&1 | Out-String
+        return @{ ok = ($LASTEXITCODE -eq 0); salida = $salida.Trim() }
+    } finally {
+        $ErrorActionPreference = $previo
+    }
+}
+
 # pyzk hace falta para Lavalle, en las dos piezas
-if ((& $pyExe -c "import zk; print('si')" 2>$null) -eq "si") { Ok "pyzk instalado" }
-else {
+if ((Invocar-Python @("-c", "import zk")).ok) {
+    Ok "pyzk instalado"
+} else {
     Aviso "falta pyzk; lo instalo"
-    & $pyExe -m pip install --quiet pyzk
-    if ($LASTEXITCODE -ne 0) { throw "No se pudo instalar pyzk" }
+    $r = Invocar-Python @("-m", "pip", "install", "--quiet", "pyzk")
+    if (-not $r.ok) { throw "No se pudo instalar pyzk:`n$($r.salida)" }
+    $r = Invocar-Python @("-c", "import zk")
+    if (-not $r.ok) { throw "pyzk quedo instalado pero no se puede importar:`n$($r.salida)" }
     Ok "pyzk instalado"
 }
 
 # que compilen antes de dejarlos como tarea
 foreach ($s in @($scriptPanel, $scriptLav)) {
-    & $pyExe -m py_compile $s
-    if ($LASTEXITCODE -ne 0) { throw "$([IO.Path]::GetFileName($s)) no compila" }
+    $r = Invocar-Python @("-m", "py_compile", $s)
+    if (-not $r.ok) { throw "$([IO.Path]::GetFileName($s)) no compila:`n$($r.salida)" }
 }
 Ok "los dos scripts compilan"
 
