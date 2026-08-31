@@ -65,5 +65,148 @@
     "worker_stall_seconds": 300,
     "all_devices_down_minutes": 15,
     "status_file": "logs/estado.json"
+  },
+  "panel": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 80,
+    "password": "CAMBIAR",
+    "doors": [
+      0
+    ],
+    "time_section": 0,
+    "validity_years": 10,
+    "sync_interval_seconds": 30,
+    "session_hours": 12,
+    "sdk_timeout_ms": 8000,
+    "import_days": 30,
+    "grupos": {
+      "fijo": {
+        "nombre": "Personal fijo",
+        "lectores": [
+          "192.168.88.245",
+          "192.168.88.252",
+          "192.168.88.253"
+        ]
+      },
+      "eventual": {
+        "nombre": "Eventual",
+        "lectores": [
+          "192.168.88.254"
+        ]
+      }
+    },
+    "max_foto_kb": 100,
+    "odoo_empleados": {
+      "enabled": true,
+      "employee_type_por_tipo": {
+        "fijo": "employee",
+        "eventual": "eventual"
+      },
+      "work_schedule_por_tipo": {},
+      "turno_por_defecto": "day"
+    }
+  },
+  "zkteco": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8081,
+    "password": "CAMBIAR",
+    "session_hours": 12,
+    "devices": [
+      {
+        "ip": "192.168.0.80",
+        "puerto": 4370,
+        "password": 0,
+        "nombre": "Horus"
+      }
+    ],
+    "poll_seconds": 900,
+    "timeout_seconds": 30,
+    "dias_primera_carga": 7
+  },
+  "lavalle": {
+    "enabled": true,
+    "sede": "Lavalle",
+    "devices": [
+      {
+        "ip": "192.168.0.80",
+        "puerto": 4370,
+        "password": 0,
+        "nombre": "Horus"
+      }
+    ],
+    "barrido_minutos": 30,
+    "dias_primera_carga": 1,
+    "timeout_seconds": 30,
+    "reconnect_seconds": 15,
+    "heartbeat_minutes": 30,
+    "resend_interval_seconds": 60,
+    "normalize_name_ascii": true,
+    "status_file": "logs/estado_lavalle.json"
+  },
+  "sedes": {
+    "deposito": {
+      "nombre": "Deposito",
+      "tecnologia": "dahua",
+      "capacidades": {
+        "foto": true,
+        "huella": true,
+        "tipos": true,
+        "turnos": true,
+        "dni": true
+      },
+      "grupos": {
+        "fijo": {
+          "nombre": "Personal fijo",
+          "lectores": [
+            "192.168.88.245",
+            "192.168.88.252",
+            "192.168.88.253"
+          ],
+          "vigencia_dias": 3650
+        },
+        "eventual": {
+          "nombre": "Eventual",
+          "lectores": [
+            "192.168.88.254"
+          ],
+          "vigencia_dias": 90
+        }
+      },
+      "odoo": true
+    },
+    "lavalle": {
+      "nombre": "Lavalle",
+      "tecnologia": "zkteco",
+      "capacidades": {
+        "foto": false,
+        "huella": false,
+        "tipos": false,
+        "turnos": false,
+        "dni": false
+      },
+      "devices": [
+        {
+          "ip": "192.168.0.80",
+          "puerto": 4370,
+          "password": 0,
+          "nombre": "Horus"
+        }
+      ],
+      "odoo": false
+    }
+  },
+  "adms": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8082,
+    "delay": 10,
+    "error_delay": 30,
+    "timezone": -3,
+    "equipos": {
+      "CL3S211160720": "Horus (Lavalle)"
+    },
+    "sede": "lavalle"
   }
 }

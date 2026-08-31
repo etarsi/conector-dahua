@@ -8,3 +8,6 @@ logs/
 *.log
 config.json
 data/
+
+# Paquetes del SDK de Dahua (181 MB): son referencia, no codigo del proyecto
+General_NetSDK_*/
