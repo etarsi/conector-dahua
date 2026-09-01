@@ -86,12 +86,16 @@
         "lectores": [
           "192.168.88.245",
           "192.168.88.252",
-          "192.168.88.253"
+          "192.168.88.253",
+          "192.168.88.254"
         ]
       },
       "eventual": {
         "nombre": "Eventual",
         "lectores": [
+          "192.168.88.245",
+          "192.168.88.252",
+          "192.168.88.253",
           "192.168.88.254"
         ]
       }
@@ -105,6 +109,12 @@
       },
       "work_schedule_por_tipo": {},
       "turno_por_defecto": "day"
+    },
+    "https": {
+      "enabled": true,
+      "port": 443,
+      "cert": "certs/panel.crt",
+      "key": "certs/panel.key"
     }
   },
   "zkteco": {
@@ -151,7 +161,7 @@
       "tecnologia": "dahua",
       "capacidades": {
         "foto": true,
-        "huella": true,
+        "huella": false,
         "tipos": true,
         "turnos": true,
         "dni": true

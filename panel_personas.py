@@ -27,6 +27,7 @@ import os
 import queue
 import secrets
 import sqlite3
+import ssl
 import sys
 import threading
 import time
@@ -47,6 +48,14 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 DEFAULT_PANEL = {
     "enabled": True,
     "host": "0.0.0.0",
+    # El navegador solo habilita la camara en sitios seguros, asi que sin
+    # https no se puede sacar la foto de rostro desde el panel.
+    "https": {
+        "enabled": True,
+        "port": 443,
+        "cert": "certs/panel.crt",
+        "key": "certs/panel.key",
+    },
     "port": 8080,
     # Clave para entrar al panel. CAMBIALA: esta pagina da acceso a puertas.
     "password": "",
@@ -437,6 +446,19 @@ def init_db():
                 cr.execute("ALTER TABLE sincronizacion ADD COLUMN huella_hash TEXT")
             conn.commit()
             logging.info(f"Base del panel lista: {DB_PATH}")
+        finally:
+            conn.close()
+
+
+def persona_por_dni(dni, sede):
+    """La persona de esa sede con ese DNI, o None."""
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            f = conn.execute(
+                "SELECT dni, nombre, tipo, activo FROM personas WHERE sede = ? AND dni = ?",
+                (sede, dni)).fetchone()
+            return dict(f) if f else None
         finally:
             conn.close()
 
@@ -1541,6 +1563,59 @@ def aplicar_tarea_zkteco(t, ip):
     return lector_zkteco.alta_persona(equipo, dni, t["nombre"])
 
 
+def reconciliar_lectores():
+    """Le da una fila de sincronizacion a cada persona por cada lector que le toca.
+
+    Los lectores de una persona salen de config.json, y hasta ahora eso se
+    miraba solo al darla de alta. Si despues se agregaba un equipo al grupo,
+    los que ya estaban cargados no subian nunca a ese equipo: no habia nada
+    que volviera a comparar la configuracion contra lo sincronizado.
+
+    Corre al arrancar el panel y solo agrega trabajo, nunca lo quita. Una fila
+    marcada 'ausente' -no le tocaba ese lector- pasa a pendiente si ahora si le
+    toca. Lo que ya estaba en ok o en error se deja como esta, para no rehacer
+    altas que ya funcionaron ni pisar un error que hay que mirar.
+    """
+    agregadas = 0
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            cr = conn.cursor()
+            personas = cr.execute(
+                "SELECT dni, nombre, sede, tipo FROM personas WHERE activo = 1").fetchall()
+            existentes = {(r["sede"], r["dni"], r["equipo"]): r["estado"]
+                          for r in cr.execute(
+                              "SELECT sede, dni, equipo, estado FROM sincronizacion")}
+
+            for per in personas:
+                for ip in lectores_para(per["sede"], per["tipo"]):
+                    clave = (per["sede"], per["dni"], ip)
+                    estado = existentes.get(clave)
+                    if estado in (ESTADO_OK, ESTADO_ERROR, ESTADO_PENDIENTE):
+                        continue
+                    cr.execute("""
+                        INSERT INTO sincronizacion
+                            (sede, dni, equipo, accion, estado, actualizado)
+                        VALUES (?, ?, ?, 'alta', ?, ?)
+                        ON CONFLICT(sede, dni, equipo) DO UPDATE SET
+                            accion = 'alta',
+                            estado = excluded.estado,
+                            actualizado = excluded.actualizado
+                    """, (per["sede"], per["dni"], ip, ESTADO_PENDIENTE, ahora_txt()))
+                    agregadas += 1
+            conn.commit()
+        finally:
+            conn.close()
+
+    if agregadas:
+        logging.info(f"Reconciliacion: {agregadas} altas pendientes por lectores "
+                     f"que se agregaron a la configuracion")
+        HAY_TRABAJO.set()
+    else:
+        logging.info("Reconciliacion: todos ya estan en los lectores que les tocan")
+    return agregadas
+
+
 def worker_sincronizacion():
     intervalo = int(PANEL["sync_interval_seconds"])
     while not STOP.is_set():
@@ -1808,7 +1883,11 @@ def importar_de_lectores(sede=None):
                     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
                     ON CONFLICT(sede, dni) DO UPDATE SET
                         nombre = CASE WHEN personas.nombre = '' THEN excluded.nombre ELSE personas.nombre END,
-                        tipo = excluded.tipo,
+                        -- Si el lector no permite deducir el tipo se conserva el
+                        -- que ya tenia. Antes se pisaba con NULL, y desde que la
+                        -- misma persona puede estar cargada en todos los equipos
+                        -- eso dejaba sin tipo a todo el padron de una sola pasada.
+                        tipo = CASE WHEN excluded.tipo IS NULL THEN personas.tipo ELSE excluded.tipo END,
                         lectores = excluded.lectores,
                         observaciones = excluded.observaciones,
                         actualizado = excluded.actualizado
@@ -2102,6 +2181,17 @@ class Handler(BaseHTTPRequestHandler):
                             {"error": f"No se pudo pedir el proximo ID al lector: {exc}"}, 502)
             elif not dni or len(dni) < 3:
                 return self._json({"error": "El DNI tiene que ser numerico"}, 400)
+
+            # Un DNI repetido no puede crear una persona nueva: la clave es
+            # (sede, dni), asi que el alta pisaria en silencio a la que ya
+            # estaba. Al editar se manda el DNI original y ahi si se permite.
+            editando = (datos.get("editando") or "").strip()
+            if dni != editando:
+                ya = persona_por_dni(dni, sede)
+                if ya:
+                    return self._json({"error":
+                        f"Ya hay una persona con el DNI {dni}: {ya['nombre']}. "
+                        f"Si querés modificarla, buscala en la lista y usá Editar."}, 409)
 
             if foto and not caps.get("foto"):
                 return self._json(
@@ -2438,6 +2528,15 @@ PAGINA = r"""<!doctype html>
   .tag.espera{ background: var(--espera-fondo); color: var(--espera); border-color: transparent; }
   .tag.gris  { color: var(--texto-3); border-style: dashed; }
 
+  /* ---------- Camara ---------- */
+  .foto-botones { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .camara { margin-top: 14px; }
+  .camara video {
+    width: 100%; max-width: 360px; border-radius: var(--radio-chico);
+    background: #000; display: block; margin-bottom: 10px;
+    transform: scaleX(-1);          /* espejo: es como uno se ve, cuesta menos encuadrar */
+  }
+
   /* ---------- Lista de personas ---------- */
   .barra { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
   .barra input { flex: 1; min-width: 180px; }
@@ -2723,8 +2822,19 @@ PAGINA = r"""<!doctype html>
           <div class="foto-fila">
             <img id="preview" class="foto-preview" alt="">
             <div style="flex:1;min-width:0">
-              <input id="foto" type="file" accept="image/*" capture="user" onchange="prepararFoto(event)">
+              <div class="foto-botones">
+                <button type="button" class="btn-2 btn-chico oculto" id="btnCamara"
+                        onclick="abrirCamara()">Sacar foto</button>
+                <input id="foto" type="file" accept="image/*" capture="user" onchange="prepararFoto(event)">
+              </div>
               <p class="ayuda" id="fotoInfo">De frente y con buena luz. Se achica sola.</p>
+            </div>
+          </div>
+          <div id="camara" class="camara oculto">
+            <video id="video" autoplay playsinline muted></video>
+            <div class="foto-botones">
+              <button type="button" class="btn-principal btn-chico" onclick="capturarFoto()">Capturar</button>
+              <button type="button" class="btn-2 btn-chico" onclick="cerrarCamara()">Cancelar</button>
             </div>
           </div>
         </div>
@@ -2976,6 +3086,15 @@ function aplicarCapacidades() {
   var bt = document.getElementById("bloqueTipo"), bf = document.getElementById("bloqueFoto");
   if (bt) bt.classList.toggle("oculto", !c.tipos);
   if (bf) bf.classList.toggle("oculto", !c.foto);
+  // La camara solo existe si el panel se abrio por https. Cuando no, en vez
+  // de un boton muerto se explica por que no esta.
+  var bc = document.getElementById("btnCamara");
+  if (bc) bc.classList.toggle("oculto", !(c.foto && hayCamara()));
+  var info = document.getElementById("fotoInfo");
+  if (info && c.foto && !hayCamara()) {
+    info.textContent = "De frente y con buena luz. Se achica sola. " +
+      "Para sacar la foto desde acá hay que entrar por https://" + location.host + "/";
+  }
   var bh = document.getElementById("btnHuellas");
   if (bh) bh.classList.toggle("oculto", !c.huella);
   // Lavalle no tiene turno noche: se oculta el selector y queda en dia
@@ -3043,35 +3162,87 @@ function mostrarTipo() {
 }
 
 /* ---------- foto ---------- */
+/* Achica la imagen y la deja lista para mandar. La usan tanto el archivo
+   como la foto sacada con la camara, asi que el limite de tamano y la
+   calidad se tocan en un solo lugar. */
+function usarImagen(fuente, anchoFuente, altoFuente) {
+  var max = 800, ancho = anchoFuente, alto = altoFuente;
+  if (ancho > max || alto > max) {
+    var f = Math.min(max / ancho, max / alto);
+    ancho = Math.round(ancho * f);
+    alto = Math.round(alto * f);
+  }
+  var lienzo = document.createElement("canvas");
+  lienzo.width = ancho; lienzo.height = alto;
+  lienzo.getContext("2d").drawImage(fuente, 0, 0, ancho, alto);
+  var calidad = 0.9, datos;
+  do {
+    datos = lienzo.toDataURL("image/jpeg", calidad);
+    calidad -= 0.1;
+  } while (datos.length * 0.75 > 95 * 1024 && calidad > 0.25);
+  FOTO = datos;
+  document.getElementById("preview").src = datos;
+  document.getElementById("fotoInfo").textContent =
+    ancho + "×" + alto + " · " + Math.round(datos.length * 0.75 / 1024) + " KB";
+}
+
 function prepararFoto(ev) {
   var archivo = ev.target.files[0];
   if (!archivo) return;
   var lector = new FileReader();
   lector.onload = function (e) {
     var img = new Image();
-    img.onload = function () {
-      var max = 800, ancho = img.width, alto = img.height;
-      if (ancho > max || alto > max) {
-        var f = Math.min(max / ancho, max / alto);
-        ancho = Math.round(ancho * f);
-        alto = Math.round(alto * f);
-      }
-      var lienzo = document.createElement("canvas");
-      lienzo.width = ancho; lienzo.height = alto;
-      lienzo.getContext("2d").drawImage(img, 0, 0, ancho, alto);
-      var calidad = 0.9, datos;
-      do {
-        datos = lienzo.toDataURL("image/jpeg", calidad);
-        calidad -= 0.1;
-      } while (datos.length * 0.75 > 95 * 1024 && calidad > 0.25);
-      FOTO = datos;
-      document.getElementById("preview").src = datos;
-      document.getElementById("fotoInfo").textContent =
-        ancho + "×" + alto + " · " + Math.round(datos.length * 0.75 / 1024) + " KB";
-    };
+    img.onload = function () { usarImagen(img, img.width, img.height); };
     img.src = e.target.result;
   };
   lector.readAsDataURL(archivo);
+}
+
+/* ---------- camara ----------
+   El navegador solo entrega la camara en un sitio seguro. Si el panel se
+   abre por http el boton ni se muestra, con una explicacion, para que nadie
+   apriete algo que no puede funcionar. */
+let CAMARA = null;
+
+function hayCamara() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
+function abrirCamara() {
+  if (!hayCamara()) { avisar("Este navegador no da acceso a la camara", true); return; }
+  navigator.mediaDevices.getUserMedia({
+    video: {facingMode: "user", width: {ideal: 1280}, height: {ideal: 720}},
+    audio: false
+  }).then(function (flujo) {
+    CAMARA = flujo;
+    var v = document.getElementById("video");
+    v.srcObject = flujo;
+    document.getElementById("camara").classList.remove("oculto");
+    document.getElementById("btnCamara").classList.add("oculto");
+  }).catch(function (e) {
+    var motivo = (e && e.name === "NotAllowedError")
+      ? "Hay que permitir la camara en el navegador"
+      : (e && e.name === "NotFoundError") ? "No se encontro ninguna camara" : e.message;
+    avisar("No se pudo abrir la camara: " + motivo, true);
+  });
+}
+
+function capturarFoto() {
+  var v = document.getElementById("video");
+  if (!v.videoWidth) { avisar("La camara todavia no esta lista", true); return; }
+  usarImagen(v, v.videoWidth, v.videoHeight);
+  cerrarCamara();
+}
+
+function cerrarCamara() {
+  if (CAMARA) {
+    CAMARA.getTracks().forEach(function (t) { t.stop(); });
+    CAMARA = null;
+  }
+  var v = document.getElementById("video");
+  if (v) v.srcObject = null;
+  document.getElementById("camara").classList.add("oculto");
+  if (hayCamara()) document.getElementById("btnCamara").classList.remove("oculto");
 }
 
 /* ---------- alta ---------- */
@@ -3085,7 +3256,10 @@ function guardar() {
     foto_base64: FOTO,
     tipo: tipoElegido(),
     turno: turnoElegido(),
-    sede: SEDE
+    sede: SEDE,
+    // Sin esto el backend no puede distinguir un alta con DNI repetido
+    // de la edicion de esa misma persona.
+    editando: DNI_EDITANDO || ""
   };
   var btn = document.getElementById("btnGuardar");
   btn.disabled = true;
@@ -3137,6 +3311,7 @@ function limpiar() {
   document.getElementById("tituloForm").textContent = "Nueva persona";
   document.querySelectorAll(".rbTipo").forEach(function (c) { c.checked = false; });
   DNI_EDITANDO = null;
+  cerrarCamara();
   document.getElementById("turno-day").checked = true;
   vigenciaPorDefecto();
   mostrarTipo();
@@ -3156,11 +3331,20 @@ function tagTurno(p) {
   return '<span class="tag">' + (p.turno === "night" ? "Turno noche" : "Turno día") + "</span>";
 }
 function tagHuella(p) {
-  // El lector de Lavalle no toma huella: no se muestra el estado
+  // Solo donde la huella sigue en uso. En Deposito se apago: ahora todos
+  // fichan con rostro y la huella dejo de pedirse.
   if (!capacidadesSede().huella) return "";
   var n = p.huella_cantidad || 0;
   if (n > 0) return '<span class="tag ok">' + n + (n === 1 ? " huella" : " huellas") + "</span>";
   return '<span class="tag gris">sin huella</span>';
+}
+
+function tagFoto(p) {
+  // Sin rostro cargado la persona no puede fichar, asi que conviene que se
+  // vea en la lista y no haya que abrir la ficha para darse cuenta.
+  if (!capacidadesSede().foto) return "";
+  return p.tiene_foto ? '<span class="tag ok">con foto</span>'
+                      : '<span class="tag mal">sin foto</span>';
 }
 function tagsLectores(p) {
   var s = p.sync || {};
@@ -3186,7 +3370,7 @@ function cargar() {
             (p.activo ? "" : ' <span class="tag mal">baja</span>') + "</div>" +
           '<div class="persona-dni">' + (capacidadesSede().dni === false ? "ID " : "DNI ") +
             escapar(p.dni) + "</div>" +
-          '<div class="persona-tags">' + tagTipo(p) + tagTurno(p) + tagHuella(p) + tagsLectores(p) + "</div>" +
+          '<div class="persona-tags">' + tagTipo(p) + tagTurno(p) + tagFoto(p) + tagHuella(p) + tagsLectores(p) + "</div>" +
           '<div class="persona-acciones">' +
             (capacidadesSede().huella
                ? '<button class="btn-2 btn-chico" data-accion="huella" data-dni="' + escapar(p.dni) + '" data-nombre="' + escapar(p.nombre) + '">Tomar huella</button>'
@@ -3366,6 +3550,80 @@ if (TOKEN) {
 # =========================
 # MAIN
 # =========================
+class RedirectorHTTPS(BaseHTTPRequestHandler):
+    """Manda a https cualquier cosa que llegue por http.
+
+    Se deja el puerto 80 escuchando para que quien escriba la direccion sin
+    protocolo -que es lo que hace todo el mundo- termine igual en el panel.
+    """
+
+    protocol_version = "HTTP/1.1"
+
+    def _redirigir(self):
+        host = (self.headers.get("Host") or PANEL["host"]).split(":")[0]
+        puerto = int(PANEL["https"]["port"])
+        destino = f"https://{host}" + ("" if puerto == 443 else f":{puerto}") + self.path
+        self.send_response(301)
+        self.send_header("Location", destino)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_GET = do_POST = do_HEAD = _redirigir
+
+    def log_message(self, *a):
+        pass
+
+
+def armar_servidores():
+    """Levanta el panel y, si hay certificado, lo deja en https.
+
+    El https no es un lujo: el navegador solo habilita la camara en un sitio
+    seguro, asi que sin esto la foto de rostro no se puede sacar desde el
+    panel. De paso, la clave y el token de sesion dejan de viajar en claro.
+
+    Si falta el certificado se sigue en http, avisando: es preferible un panel
+    andando sin camara que un panel que no arranca.
+    """
+    cfg = PANEL.get("https") or {}
+    cert = os.path.join(BASE_DIR, cfg.get("cert", ""))
+    clave = os.path.join(BASE_DIR, cfg.get("key", ""))
+    usar_https = bool(cfg.get("enabled")) and os.path.exists(cert) and os.path.exists(clave)
+
+    if bool(cfg.get("enabled")) and not usar_https:
+        logging.warning(f"https pedido pero falta el certificado ({cert}). "
+                        f"Se sigue en http y la camara del panel no va a funcionar.")
+
+    if not usar_https:
+        srv = ThreadingHTTPServer((PANEL["host"], int(PANEL["port"])), Handler)
+        srv.daemon_threads = True
+        logging.info(f"Panel en http://{PANEL['host']}:{PANEL['port']}/  (Ctrl+C para salir)")
+        return srv, None
+
+    puerto = int(cfg.get("port", 443))
+    srv = ThreadingHTTPServer((PANEL["host"], puerto), Handler)
+    srv.daemon_threads = True
+    contexto = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    contexto.load_cert_chain(cert, clave)
+    srv.socket = contexto.wrap_socket(srv.socket, server_side=True)
+    logging.info(f"Panel en https://{PANEL['host']}:{puerto}/  (Ctrl+C para salir)")
+
+    # El puerto de siempre queda redirigiendo, no sirviendo el panel.
+    redirector = None
+    if int(PANEL["port"]) != puerto:
+        try:
+            redirector = ThreadingHTTPServer((PANEL["host"], int(PANEL["port"])), RedirectorHTTPS)
+            redirector.daemon_threads = True
+            threading.Thread(target=redirector.serve_forever,
+                             name="RedirHTTP", daemon=True).start()
+            logging.info(f"El puerto {PANEL['port']} redirige a https")
+        except OSError as exc:
+            logging.warning(f"No se pudo abrir el puerto {PANEL['port']} para redirigir: {exc}")
+
+    if PANEL["host"] == "0.0.0.0":
+        logging.info("Escucha en toda la red: limita el acceso con el firewall de Windows")
+    return srv, redirector
+
+
 def main():
     if not DEVICES:
         logging.error("No hay lectores configurados en config.json")
@@ -3383,6 +3641,8 @@ def main():
 
     init_db()
 
+    reconciliar_lectores()
+
     hilos = [threading.Thread(target=worker_sincronizacion, name="Sync", daemon=True)]
     for dev in DEVICES:
         DEV_STATE[dev["ip"]] = {"conectado": False, "login_id": None, "disconnect": threading.Event()}
@@ -3390,11 +3650,7 @@ def main():
     for h in hilos:
         h.start()
 
-    servidor = ThreadingHTTPServer((PANEL["host"], int(PANEL["port"])), Handler)
-    servidor.daemon_threads = True
-    logging.info(f"Panel disponible en http://{PANEL['host']}:{PANEL['port']}/  (Ctrl+C para salir)")
-    if PANEL["host"] == "0.0.0.0":
-        logging.info("Escucha en toda la red: limita el acceso al puerto con el firewall de Windows")
+    servidor, redirector = armar_servidores()
 
     try:
         servidor.serve_forever()
@@ -3406,6 +3662,8 @@ def main():
         for st in DEV_STATE.values():
             st["disconnect"].set()
         servidor.shutdown()
+        if redirector:
+            redirector.shutdown()
         for h in hilos:
             h.join(timeout=5)
         try:

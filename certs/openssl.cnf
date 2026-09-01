@@ -1,0 +1,21 @@
+[req]
+distinguished_name = dn
+x509_extensions    = v3
+prompt             = no
+
+[dn]
+C  = AR
+O  = Sebigus
+CN = panel.control.rrhh
+
+[v3]
+subjectAltName   = @alt
+basicConstraints = critical, CA:FALSE
+keyUsage         = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[alt]
+DNS.1 = panel.control.rrhh
+DNS.2 = localhost
+IP.1  = 192.168.88.240
+IP.2  = 127.0.0.1

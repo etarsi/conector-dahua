@@ -1,7 +1,7 @@
 # Panel de RRHH y conector de Lavalle en el servidor
 
 Cómo se montan las dos piezas en un Windows Server y qué hace falta para que las
-PCs de RRHH entren por `http://panel.control.rrhh`.
+PCs de RRHH entren por `https://panel.control.rrhh`.
 
 **Servidor elegido: `192.168.88.240`.**
 
@@ -21,8 +21,9 @@ Deja instalado:
 |---|---|
 | Panel de personas | tarea `Panel RRHH`, arranca sola al bootear |
 | Conector de Lavalle | tarea `Conector Lavalle`, arranca sola al bootear |
-| Puerto 80 | abierto en el firewall **solo** para `192.168.0.0/16` |
+| Puertos 80 y 443 | abiertos en el firewall **solo** para `192.168.0.0/16` |
 | DNS | zona `control.rrhh` con `panel` → la IP del servidor |
+| HTTPS | el panel sirve en 443; el 80 redirige |
 
 Las dos tareas corren como **SYSTEM**, así que no hay que guardar la contraseña de
 nadie, y se reintentan solas cada minuto si se caen.
@@ -123,7 +124,34 @@ Cuando se le cambie la IP al lector, hay que actualizar **dos** lugares de
 "zkteco":  { "devices": [ { "ip": "LA NUEVA IP", ... } ] }
 ```
 
-y reiniciar las tareas. No hace falta reinstalar nada.
+y reiniciar las tareas:
+
+```
+Stop-ScheduledTask "Panel RRHH","Conector Lavalle"; Start-Sleep 3
+Start-ScheduledTask "Panel RRHH"; Start-ScheduledTask "Conector Lavalle"
+```
+
+No hace falta reinstalar nada.
+
+### El certificado es autofirmado
+
+El panel va por https porque **el navegador solo habilita la cámara en sitios
+seguros**, y sin cámara no se puede sacar la foto de rostro desde el panel. De
+paso, la clave y el token de sesión dejan de viajar en texto claro.
+
+El certificado está en `certs/panel.crt` y vale hasta 2036. Al entrar por primera
+vez el navegador advierte que no lo conoce: hay que aceptar una vez. Como este
+servidor es controlador de dominio, se puede distribuir por GPO (Directiva de
+grupo → Configuración de Windows → Directivas de clave pública → Entidades de
+certificación raíz de confianza) y la advertencia desaparece en todas las PCs.
+
+Si algún día hay que regenerarlo, con openssl:
+
+```
+openssl req -x509 -newkey rsa:2048 -nodes -keyout certs\panel.key -out certs\panel.crt -days 3650 -config certs\openssl.cnf
+```
+
+**La clave privada (`certs/panel.key`) no va al repositorio**: está en el .gitignore.
 
 ### La clave del panel tiene 3 caracteres
 
@@ -140,7 +168,13 @@ Get-ScheduledTask "Panel RRHH","Conector Lavalle" | Get-ScheduledTaskInfo
 Get-Content C:\proyectos\conector-dahua\logs\panel_personas.log -Tail 20 -Wait
 Get-Content C:\proyectos\conector-dahua\logs\lavalle.log -Tail 20 -Wait
 Get-Content C:\proyectos\conector-dahua\logs\estado_lavalle.json
-Restart-ScheduledTask "Panel RRHH"
+```
+
+Para reiniciar una tarea. **No existe `Restart-ScheduledTask`**: hay que pararla y
+volver a arrancarla, con una pausa en el medio para que el proceso termine de cerrar.
+
+```
+Stop-ScheduledTask "Panel RRHH"; Start-Sleep 3; Start-ScheduledTask "Panel RRHH"
 ```
 
 `estado_lavalle.json` es el más rápido para ver si el conector está bien: dice si
