@@ -1084,7 +1084,10 @@ def hilo_mantenimiento(cfg):
 # ======================================================================
 def arrancar(cfg):
     global _CAPTURAS_ON
-    _CAPTURAS_ON = cfg.get("guardar_fotos", True)
+    # OFF por defecto: los lectores de PUERTA no llevan foto (y la descarga HTTP no
+    # anda en estos equipos). La foto de ASISTENCIA la guarda el conector (NetSDK)
+    # en C:\Lector\Capturas; el panel la lee de ahi. Solo se prende con guardar_fotos=true.
+    _CAPTURAS_ON = cfg.get("guardar_fotos", False)
     hilos = []
     if cfg.get("backup_automatico", True):
         hilos.append(threading.Thread(target=hilo_mantenimiento, args=(cfg,),
