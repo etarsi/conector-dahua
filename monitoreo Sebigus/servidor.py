@@ -227,6 +227,27 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _sedes(self):
+        """Sedes que el usuario puede ver. Lista guardada vacia = TODAS."""
+        s = self._sesion()
+        if not s:
+            return []
+        todas = list(nucleo.SEDES.keys())
+        propias = [x for x in (s.get("sedes") or []) if x in todas]
+        return propias or todas
+
+    def _exigir_sede(self, sede):
+        """True si el usuario puede ver esa sede. Si no, 403/401 y False."""
+        s = self._sesion()
+        if not s:
+            self._error("sesion vencida", 401)
+            return False
+        if sede not in self._sedes():
+            log.warning("'%s' sin acceso a la sede %s desde %s", s["usuario"], sede, self.address_string())
+            self._error("no tenés acceso a esta sede", 403)
+            return False
+        return True
+
     def _sede_valida(self, sede):
         """Devuelve la sede si existe, o None (y responde 404)."""
         if sede in nucleo.SEDES:
@@ -263,15 +284,17 @@ class Handler(BaseHTTPRequestHandler):
                                "nombre": s["nombre"] if s else None,
                                "rol": s["rol"] if s else None,
                                "puertas": s.get("puertas", []) if s else [],
-                               "secciones": self._secciones() if s else []})
+                               "secciones": self._secciones() if s else [],
+                               "sedes": self._sedes() if s else []})
         if camino == "/api/sedes":
+            permitidas = self._sedes()
             return self._json([
                 {"clave": c, "nombre": d["nombre"], "ids": d["ids"], "tiene_nvr": d["tiene_nvr"],
                  "solo_lectura": not d["escritura"],
                  "lectores": [{"ip": ip, "nombre": nucleo.ESTADO.get(ip, {}).get("nombre", ip)}
                               for ip in d["lectores"]],
                  "fichadores": asistencia.lectores_de(c)}
-                for c, d in nucleo.SEDES.items()])
+                for c, d in nucleo.SEDES.items() if c in permitidas])
 
         if not self._autorizado():
             return self._error("sesion vencida", 401)
@@ -291,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._error("no encontrado", 404)
 
     def _get_sede(self, sede, resto, params):
+        if not self._exigir_sede(sede):
+            return
         seccion = resto[0] if resto else ""
         necesita = _SECCION_GET.get(seccion)
         if necesita and not self._exigir_seccion(*necesita):
@@ -558,15 +583,22 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return [ip for ip in puertas if ip in nucleo.LECTORES]
 
+    def _sedes_validas(self, sedes):
+        """Filtra a claves de sede reales. None => None (no cambia)."""
+        if sedes is None:
+            return None
+        return [s for s in sedes if s in nucleo.SEDES]
+
     def _usuarios_post(self, camino, datos):
         # secciones y puertas los limpia base (secciones válidas / IPs conocidas);
-        # acá solo filtramos las puertas a lectores reales para no guardar basura.
+        # acá solo filtramos las puertas/sedes a valores reales para no guardar basura.
         if camino == "/api/usuarios":
             ok, error = base.crear_usuario(
                 datos.get("usuario", ""), datos.get("clave", ""),
                 datos.get("rol", ""), (datos.get("nombre") or "").strip(),
                 puertas=self._puertas_validas(datos.get("puertas")),
-                secciones=datos.get("secciones"))
+                secciones=datos.get("secciones"),
+                sedes=self._sedes_validas(datos.get("sedes")))
             return self._json({"ok": True}) if ok else self._error(error, 400)
         objetivo = unquote(camino[len("/api/usuarios/"):])
         if objetivo == self._sesion()["usuario"] and (
@@ -576,10 +608,13 @@ class Handler(BaseHTTPRequestHandler):
             objetivo, nombre=datos.get("nombre"), rol=datos.get("rol"),
             activo=datos.get("activo"), clave=datos.get("clave"),
             puertas=self._puertas_validas(datos.get("puertas")),
-            secciones=datos.get("secciones"))
+            secciones=datos.get("secciones"),
+            sedes=self._sedes_validas(datos.get("sedes")))
         return self._json({"ok": True}) if ok else self._error(error, 400)
 
     def _post_sede(self, sede, resto, datos):
+        if not self._exigir_sede(sede):
+            return
         seccion = resto[0] if resto else ""
 
         # Primero el filtro por sección: sin la sección habilitada no se sigue,
@@ -683,6 +718,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True}) if ok else self._error(error, 400)
         sede = partes[0]
         if not self._sede_valida(sede):
+            return
+        if not self._exigir_sede(sede):
             return
         if not self._exigir_seccion("personas"):
             return

@@ -1003,6 +1003,15 @@ function pedirDatos({ titulo, campos, ok = "Guardar" }) {
           <div class="presets">${presets}</div>
           <div class="chips">${items}</div></div>`;
       }
+      if (c.tipo === "sedes") {
+        const sel = new Set(c.valor || []);
+        const items = (estado.sedes || []).map((s) =>
+          `<label class="chip"><input type="checkbox" data-sedecheck value="${escapar(s.clave)}"
+             ${sel.has(s.clave) ? "checked" : ""}>${escapar(s.nombre)}</label>`).join("");
+        return `<div class="bloque" data-campo="${c.id}"><span>${escapar(c.label)}</span>
+          ${c.ayuda ? `<span class="ayuda" style="margin:0 0 6px">${escapar(c.ayuda)}</span>` : ""}
+          <div class="chips">${items}</div></div>`;
+      }
       return `<label class="bloque">${escapar(c.label)}
         <input type="${c.tipo || "text"}" data-campo="${c.id}" value="${escapar(c.valor || "")}"
           placeholder="${escapar(c.placeholder || "")}" autocomplete="off" ${c.requerido ? "required" : ""}>
@@ -1039,6 +1048,8 @@ function pedirDatos({ titulo, campos, ok = "Guardar" }) {
           datos[c.id] = [...el.querySelectorAll("[data-puerta]:checked")].map((i) => i.value);
         } else if (c.tipo === "secciones") {
           datos[c.id] = [...el.querySelectorAll("[data-seccion]:checked")].map((i) => i.value);
+        } else if (c.tipo === "sedes") {
+          datos[c.id] = [...el.querySelectorAll("[data-sedecheck]:checked")].map((i) => i.value);
         } else if (c.tipo === "checkbox") {
           datos[c.id] = el.checked;
         } else {
@@ -1077,8 +1088,10 @@ async function cargarUsuarios() {
     return u.puertas.map(nombreDe).join(", ");
   };
   const ve = (u) => (u.secciones || []).map((s) => (SECCIONES.find((x) => x.id === s) || {}).texto || s).join(" · ");
+  const nombreSede = (c) => (estado.sedes.find((s) => s.clave === c) || {}).nombre || c;
+  const veSedes = (u) => (u.sedes && u.sedes.length) ? u.sedes.map(nombreSede).join(" · ") : "todas";
   $("#tabla-usuarios").innerHTML = `
-    <thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Secciones</th><th>Abre puertas</th><th>Estado</th>
+    <thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Secciones</th><th>Sedes</th><th>Abre puertas</th><th>Estado</th>
       <th>Último acceso</th><th></th></tr></thead>
     <tbody>${usuarios.map((u) => `
       <tr class="${u.activo ? "" : "baja"}">
@@ -1086,6 +1099,7 @@ async function cargarUsuarios() {
         <td>${escapar(u.nombre || "—")}</td>
         <td><span class="rol-chip ${u.rol}">${u.rol}</span></td>
         <td style="font-size:12px;color:var(--tenue)">${escapar(ve(u))}</td>
+        <td style="font-size:12px;color:var(--tenue)">${escapar(veSedes(u))}</td>
         <td style="font-size:12.5px;color:var(--tenue)">${escapar(abre(u))}</td>
         <td>${u.activo ? '<span class="etiqueta ok">activo</span>' : '<span class="etiqueta">inactivo</span>'}</td>
         <td class="num">${escapar(u.ultimo_acceso || "—")}</td>
@@ -1108,6 +1122,8 @@ $("#btn-nuevo-usuario").addEventListener("click", async () => {
       { id: "clave", label: "Contraseña", tipo: "password", requerido: true, ayuda: "Mínimo 4 caracteres" },
       { id: "secciones", label: "Secciones que ve", tipo: "secciones", valor: [],
         ayuda: "Elegí un preset o tildá a mano. Vacío = las que trae el rol." },
+      { id: "sedes", label: "Sedes que ve", tipo: "sedes", valor: [],
+        ayuda: "Vacío = todas. Tildá para limitar a Lavalle, Depósito, o ambas." },
       { id: "puertas", label: "Puertas que puede abrir", tipo: "puertas", valor: [],
         ayuda: "Para el portero/operador. Supervisor y admin ya pueden abrir todas." },
     ],
@@ -1133,6 +1149,8 @@ $("#tabla-usuarios").addEventListener("click", async (ev) => {
         { id: "activo", label: "Usuario activo (puede entrar)", tipo: "checkbox", valor: u.activo },
         { id: "secciones", label: "Secciones que ve", tipo: "secciones", valor: u.secciones || [],
           ayuda: "Elegí un preset o tildá a mano. Vacío = las que trae el rol." },
+        { id: "sedes", label: "Sedes que ve", tipo: "sedes", valor: u.sedes || [],
+          ayuda: "Vacío = todas. Tildá para limitar a Lavalle, Depósito, o ambas." },
         { id: "puertas", label: "Puertas que puede abrir", tipo: "puertas", valor: u.puertas || [],
           ayuda: "Para el portero/operador. Supervisor y admin ya pueden abrir todas." },
         { id: "clave", label: "Nueva contraseña", tipo: "password",

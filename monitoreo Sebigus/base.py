@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
     activo        INTEGER NOT NULL DEFAULT 1,
     puertas       TEXT NOT NULL DEFAULT '[]', -- IPs que puede abrir aparte del rol
     secciones     TEXT NOT NULL DEFAULT '[]', -- secciones habilitadas ([] = las del rol)
+    sedes         TEXT NOT NULL DEFAULT '[]', -- sedes que puede ver ([] = todas)
     creado        TEXT NOT NULL,
     ultimo_acceso TEXT NOT NULL DEFAULT '',
     CHECK (rol IN ('admin','supervisor','operador'))
@@ -282,6 +283,8 @@ def iniciar(sede_v1=None):
                 cx.execute("ALTER TABLE usuarios ADD COLUMN puertas TEXT NOT NULL DEFAULT '[]'")
             if "secciones" not in _columnas(cx, "usuarios"):
                 cx.execute("ALTER TABLE usuarios ADD COLUMN secciones TEXT NOT NULL DEFAULT '[]'")
+            if "sedes" not in _columnas(cx, "usuarios"):
+                cx.execute("ALTER TABLE usuarios ADD COLUMN sedes TEXT NOT NULL DEFAULT '[]'")
             if "foto" not in _columnas(cx, "eventos"):
                 cx.execute("ALTER TABLE eventos ADD COLUMN foto TEXT NOT NULL DEFAULT ''")
             if version < 2:
@@ -1242,8 +1245,8 @@ def _usuario_dict(fila):
     secciones = _lista_json(fila, "secciones") or secciones_de_rol(fila["rol"])
     return {"usuario": fila["usuario"], "nombre": fila["nombre"], "rol": fila["rol"],
             "activo": bool(fila["activo"]), "puertas": _lista_json(fila, "puertas"),
-            "secciones": secciones, "creado": fila["creado"],
-            "ultimo_acceso": fila["ultimo_acceso"]}
+            "secciones": secciones, "sedes": _lista_json(fila, "sedes"),  # [] = todas
+            "creado": fila["creado"], "ultimo_acceso": fila["ultimo_acceso"]}
 
 
 def hay_usuarios():
@@ -1283,7 +1286,7 @@ def verificar_usuario(nombre_usuario, clave):
                    (ahora(), fila["usuario"]))
     d = _usuario_dict(fila)
     return {"usuario": d["usuario"], "nombre": d["nombre"], "rol": d["rol"],
-            "puertas": d["puertas"], "secciones": d["secciones"]}
+            "puertas": d["puertas"], "secciones": d["secciones"], "sedes": d["sedes"]}
 
 
 def _limpiar_secciones(secciones):
@@ -1294,9 +1297,10 @@ def _limpiar_secciones(secciones):
 
 
 def crear_usuario(nombre_usuario, clave, rol, nombre="", activo=True, puertas=None,
-                  secciones=None):
+                  secciones=None, sedes=None):
     """Devuelve (ok, error). El usuario se normaliza a minusculas.
-    `puertas`: IPs que puede abrir aparte del rol. `secciones`: [] = las del rol."""
+    `puertas`: IPs que puede abrir aparte del rol. `secciones`: [] = las del rol.
+    `sedes`: sedes que puede ver, [] = todas."""
     u = str(nombre_usuario or "").strip().lower()
     if not u.replace("_", "").replace(".", "").isalnum() or len(u) < 3:
         return False, "el usuario debe tener 3+ caracteres (letras, numeros, _ o .)"
@@ -1310,14 +1314,15 @@ def crear_usuario(nombre_usuario, clave, rol, nombre="", activo=True, puertas=No
             return False, f"el usuario '{u}' ya existe"
         cx.execute(
             "INSERT INTO usuarios (usuario, nombre, rol, clave_hash, salt, activo, puertas, "
-            "secciones, creado) VALUES (?,?,?,?,?,?,?,?,?)",
+            "secciones, sedes, creado) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (u, nombre or u, rol, h, salt, 1 if activo else 0,
-             json.dumps(list(puertas or [])), _limpiar_secciones(secciones), ahora()))
+             json.dumps(list(puertas or [])), _limpiar_secciones(secciones),
+             json.dumps(list(sedes or [])), ahora()))
     return True, ""
 
 
 def actualizar_usuario(nombre_usuario, nombre=None, rol=None, activo=None, clave=None,
-                       puertas=None, secciones=None):
+                       puertas=None, secciones=None, sedes=None):
     """Cambia campos de un usuario. Devuelve (ok, error).
 
     No deja quedarse sin ningun admin activo: si esta es la ultima cuenta admin,
@@ -1350,6 +1355,9 @@ def actualizar_usuario(nombre_usuario, nombre=None, rol=None, activo=None, clave
         if secciones is not None:
             cx.execute("UPDATE usuarios SET secciones=? WHERE usuario=?",
                        (_limpiar_secciones(secciones), u))
+        if sedes is not None:
+            cx.execute("UPDATE usuarios SET sedes=? WHERE usuario=?",
+                       (json.dumps(list(sedes)), u))
         if clave:
             if len(clave) < 4:
                 return False, "la clave debe tener al menos 4 caracteres"
