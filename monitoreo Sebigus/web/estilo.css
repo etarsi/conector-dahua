@@ -416,12 +416,21 @@ input[type=search] { min-width: 260px; }
 }
 .modal-caja {
   width: min(410px, 94vw);
+  max-height: 90vh;            /* nunca más alto que la pantalla… */
+  overflow-y: auto;           /* …y si el form es largo, scrollea adentro */
   background: var(--tarjeta);
   border: 1px solid var(--borde);
   border-radius: 14px;
   padding: 24px 26px;
   box-shadow: var(--sombra);
   animation: modal-entra .2s ease;
+}
+/* Los botones (Cancelar/Guardar) quedan pegados abajo y siempre visibles
+   aunque el formulario sea largo y haya que scrollear. */
+.modal-caja form .modal-pie {
+  position: sticky; bottom: -24px;
+  margin: 0 -26px -24px; padding: 14px 26px;
+  background: var(--tarjeta); border-top: 1px solid var(--borde);
 }
 @keyframes modal-entra { from { opacity: 0; transform: translateY(10px) scale(.98); } }
 .modal-caja h3 { margin: 0 0 9px; font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
