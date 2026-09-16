@@ -45,13 +45,15 @@ ROLES = {"operador": 1, "supervisor": 2, "admin": 3}
 # endpoints). El `rol` sigue mandando el nivel de escritura (operador mira,
 # supervisor edita, admin ademas gestiona usuarios). Las secciones dan flexibilidad:
 # un RRHH ve solo asistencias, un portero solo puertas.
-SECCIONES = ("en_vivo", "puertas", "personas", "asistencias", "camaras", "usuarios")
+# "registro" = alta de personas de ASISTENCIA (DNI/tipo/turno/foto/huella -> fichadores + Odoo).
+# Es distinto de "personas" (accesos de puerta) y de "asistencias" (el log de fichadas).
+SECCIONES = ("en_vivo", "puertas", "personas", "asistencias", "registro", "camaras", "usuarios")
 
 # Secciones por defecto de cada rol (se usan cuando el usuario no tiene una lista
 # propia, y como base de los presets).
 SECCIONES_POR_ROL = {
     "admin": list(SECCIONES),
-    "supervisor": ["en_vivo", "puertas", "personas", "asistencias", "camaras"],
+    "supervisor": ["en_vivo", "puertas", "personas", "asistencias", "registro", "camaras"],
     "operador": ["en_vivo", "camaras"],
 }
 

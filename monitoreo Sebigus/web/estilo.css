@@ -466,6 +466,13 @@ body[data-rol="operador"] .accion-supervisor { display: none !important; }
 /* Sin la sección "personas" no se ven sus botones (la verdad la impone el server). */
 body:not(.sec-personas) .accion-personas { display: none !important; }
 
+/* Registro de asistencia embebido (reusa el panel de personas dentro del monitoreo) */
+.marco-registro {
+  border: 1px solid var(--borde); border-radius: var(--r); overflow: hidden;
+  background: var(--fondo-2); height: calc(100vh - 150px); min-height: 480px;
+}
+.marco-registro iframe { width: 100%; height: 100%; border: 0; display: block; }
+
 /* Presets de secciones en el formulario de usuario */
 .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .chip-preset {

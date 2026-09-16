@@ -31,17 +31,18 @@ const TOPE_FEED = 200;
 const SECCIONES = [
   { id: "en_vivo", texto: "En vivo" },
   { id: "puertas", texto: "Puertas (abrir)" },
-  { id: "asistencias", texto: "Asistencias" },
+  { id: "asistencias", texto: "Asistencias (log)" },
+  { id: "registro", texto: "Registrar asistencia" },
   { id: "camaras", texto: "Cámaras" },
-  { id: "personas", texto: "Personas" },
+  { id: "personas", texto: "Personas (accesos)" },
   { id: "usuarios", texto: "Usuarios" },
 ];
 const PRESETS = {
-  "RRHH": ["asistencias"],
+  "RRHH": ["asistencias", "registro"],
   "Portero": ["puertas"],
   "Operador": ["en_vivo", "camaras"],
-  "Supervisor": ["en_vivo", "puertas", "asistencias", "camaras", "personas"],
-  "Admin": ["en_vivo", "puertas", "asistencias", "camaras", "personas", "usuarios"],
+  "Supervisor": ["en_vivo", "puertas", "asistencias", "registro", "camaras", "personas"],
+  "Admin": ["en_vivo", "puertas", "asistencias", "registro", "camaras", "personas", "usuarios"],
 };
 const tiene = (sec) => estado.secciones.includes(sec);
 
@@ -222,6 +223,7 @@ async function cambiarSede(sede, inicial = false) {
   if (tiene("personas")) await cargarPersonas();
   pintarFeed();
   if (vistaActiva() === "asistencias") cargarAsistencias();
+  if (vistaActiva() === "historial") cargarHistorial();
   if (vistaActiva() === "camaras") cargarCamaras();
 }
 
@@ -237,6 +239,13 @@ function irA(vista) {
   if (vista === "personas") cargarPersonas();
   if (vista === "asistencias") cargarAsistencias();
   autoRefrescoAsistencias(vista === "asistencias");
+  if (vista === "historial") cargarHistorial();
+  if (vista === "registro") {
+    // El registro reusa el panel de personas (backend probado), embebido. Vive en
+    // el :80 del mismo server. Se carga una sola vez, al entrar.
+    const fr = $("#registro-frame");
+    if (fr && !fr.getAttribute("src")) fr.src = `http://${location.hostname}/`;
+  }
   if (vista === "puertas") pintarRemoto();
   if (vista === "usuarios") cargarUsuarios();
   if (vista === "camaras") cargarCamaras(); else pararMosaico();
@@ -738,6 +747,40 @@ function autoRefrescoAsistencias(on) {
   if (refrescoAsis) { clearInterval(refrescoAsis); refrescoAsis = null; }
   if (on) refrescoAsis = setInterval(() => { if (vistaActiva() === "asistencias") cargarAsistencias(); }, 60000);
 }
+
+// ---------------------------------------------------------------- historial de accesos (puertas, texto, SIN foto)
+async function cargarHistorial() {
+  const gen = estado.generacion;
+  const params = new URLSearchParams({ limite: "300" });
+  if ($("#buscar-hist").value) params.set("q", $("#buscar-hist").value);
+  if ($("#filtro-lector-hist").value) params.set("lector", $("#filtro-lector-hist").value);
+  if ($("#filtro-rechazos-hist").checked) params.set("rechazos", "1");
+  const f = $("#filtro-fecha-hist").value;
+  if (f) params.set("desde", Math.floor(new Date(`${f}T00:00:00`).getTime() / 1000));
+  let ev;
+  try { ev = await apiSede(`/eventos?${params}`); }
+  catch (e) { avisar(e.message, "mal"); return; }
+  if (gen !== estado.generacion) return;
+  const val = $("#filtro-lector-hist").value;
+  const ops = estado.lectores.map((l) => `<option value="${escapar(l.ip)}">${escapar(l.nombre)}</option>`).join("");
+  $("#filtro-lector-hist").innerHTML = `<option value="">Todas las puertas</option>${ops}`;
+  $("#filtro-lector-hist").value = val;
+  $("#contador-hist").textContent = `${ev.length} marca(s)`;
+  $("#tabla-historial").innerHTML = ev.length ? `
+    <thead><tr><th>Cuándo</th><th>Persona</th><th>ID</th><th>Puerta</th><th>Método</th><th>Resultado</th></tr></thead>
+    <tbody>${ev.map((e) => `<tr>
+      <td class="num">${escapar(e.momento)}</td>
+      <td>${escapar(e.nombre || "—")}</td><td class="num">${escapar(e.persona_id || "—")}</td>
+      <td>${escapar(e.lector_nom || e.lector)}</td><td>${escapar(e.metodo || "—")}</td>
+      <td>${e.concedido ? '<span class="etiqueta ok">acceso</span>'
+        : `<span class="etiqueta error">${escapar(e.motivo || "rechazado")}</span>`}</td>
+    </tr>`).join("")}</tbody>`
+    : '<tbody><tr><td><p class="vacio">No hay marcas para ese filtro.</p></td></tr></tbody>';
+}
+$("#buscar-hist").addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(cargarHistorial, 250); });
+$("#filtro-lector-hist").addEventListener("change", cargarHistorial);
+$("#filtro-rechazos-hist").addEventListener("change", cargarHistorial);
+$("#filtro-fecha-hist").addEventListener("change", cargarHistorial);
 
 // ---------------------------------------------------------------- perfiles
 function pintarPerfiles() {
