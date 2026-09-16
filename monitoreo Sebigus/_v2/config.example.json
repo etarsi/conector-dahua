@@ -1,0 +1,70 @@
+{
+  "_comentario": "Copiar a config.json y poner la clave real. config.json NO va al repositorio.",
+  "host": "0.0.0.0",
+  "puerto": 8090,
+  "clave_panel": "CAMBIAR",
+  "sesion_horas": 12,
+  "log_level": "INFO",
+  "max_foto_kb": 200,
+  "eventos_en_vivo": true,
+  "vigilancia_segundos": 20,
+  "sincronizacion_segundos": 20,
+  "importar_historial_minutos": 30,
+  "usuario": "admin",
+  "clave": "CAMBIAR",
+  "lectores": [
+    {
+      "ip": "192.168.0.73",
+      "nombre": "Entrada Deposito Rack 1",
+      "sector": "1er piso",
+      "modelo": "DHI-ASI3213A-W"
+    },
+    {
+      "ip": "192.168.0.74",
+      "nombre": "Puerta Entrada Vidrio",
+      "sector": "1er piso",
+      "modelo": "DHI-ASI3213A-W"
+    },
+    {
+      "ip": "192.168.0.240",
+      "nombre": "Fichador 2do Piso",
+      "sector": "2do piso",
+      "modelo": "DHI-ASI3214A-W"
+    },
+    {
+      "ip": "192.168.0.75",
+      "nombre": "Fichador 3er Piso",
+      "sector": "3er piso",
+      "modelo": "DHI-ASI3213A-W"
+    },
+    {
+      "ip": "192.168.0.76",
+      "nombre": "Fichador 4to Piso",
+      "sector": "4to piso",
+      "modelo": "DHI-ASI3213A-W"
+    },
+    {
+      "ip": "192.168.0.78",
+      "nombre": "Fichador 5to Piso A",
+      "sector": "5to piso",
+      "modelo": "DHI-ASI3213A-W"
+    },
+    {
+      "ip": "192.168.0.79",
+      "nombre": "Fichador 5to Piso B",
+      "sector": "5to piso",
+      "modelo": "DHI-ASI3213A-W"
+    }
+  ],
+  "nvr": {
+    "ip": "192.168.5.2",
+    "puerto": 80,
+    "puerto_rtsp": 554,
+    "usuario": "usuario_del_nvr",
+    "clave": "CAMBIAR",
+    "nombre": "NVR Sebigus",
+    "modelo": "DH-NVR804-32-HDS3/I",
+    "max_canales": 32,
+    "mjpeg_subtipo": 1
+  }
+}

@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitoreo Sebigus</title>
+<link rel="stylesheet" href="/web/estilo.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#128274;</text></svg>">
+</head>
+<body>
+
+<!-- ============ Entrada ============ -->
+<div id="login" class="login oculto">
+  <form class="login-caja" id="form-login">
+    <div class="login-marca">
+      <span class="punto"></span>
+      <h1>Monitoreo <b>Sebigus</b></h1>
+    </div>
+    <p class="login-ayuda">Control de accesos</p>
+    <input type="text" id="usuario" placeholder="Usuario" autocomplete="username"
+           autocapitalize="off" spellcheck="false" required>
+    <input type="password" id="clave" placeholder="Contraseña" autocomplete="current-password" required>
+    <button type="submit">Entrar</button>
+    <p class="login-error" id="login-error"></p>
+  </form>
+</div>
+
+<!-- ============ Panel ============ -->
+<div id="panel" class="oculto">
+
+  <!-- Barra superior: solo se ve en móvil/tablet, abre el menú lateral -->
+  <header class="barra-movil">
+    <button class="menu-boton" id="menu-boton" aria-label="Abrir menú">
+      <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+    <div class="barra-marca"><span class="punto"></span> Monitoreo <b>Sebigus</b></div>
+  </header>
+  <div class="lateral-fondo" id="lateral-fondo"></div>
+
+  <aside class="lateral">
+    <div class="marca">
+      <span class="punto"></span>
+      <div>
+        <strong>Monitoreo</strong>
+        <span>Sebigus</span>
+      </div>
+    </div>
+
+    <div class="selector-sede" id="selector-sede"></div>
+
+    <nav>
+      <button class="nav-item activo" data-vista="monitoreo" data-seccion="en_vivo">
+        <svg viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
+        En vivo
+      </button>
+      <button class="nav-item" data-vista="puertas" data-seccion="puertas">
+        <svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v17h9V3zM14 3l5 2v16h-5M11 12h.01"/></svg>
+        Puertas
+      </button>
+      <button class="nav-item" data-vista="asistencias" data-seccion="asistencias">
+        <svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        Asistencias
+      </button>
+      <button class="nav-item" data-vista="camaras" data-seccion="camaras">
+        <svg viewBox="0 0 24 24"><path d="M23 7l-7 5 7 5V7zM14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/></svg>
+        Cámaras
+      </button>
+      <button class="nav-item" data-vista="personas" data-seccion="personas">
+        <svg viewBox="0 0 24 24"><path d="M16 20v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 20v-2a4 4 0 0 0-3-3.87M16 2.13a4 4 0 0 1 0 7.75"/></svg>
+        Personas
+      </button>
+      <button class="nav-item" data-vista="ajustes" data-seccion="personas" data-rol="supervisor">
+        <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.7 8a1.7 1.7 0 0 0-.4-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V8a1.7 1.7 0 0 0 1.5 1H22a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        Ajustes
+      </button>
+      <button class="nav-item" data-vista="usuarios" data-seccion="usuarios" data-rol="admin">
+        <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M23 21v-2a4 4 0 0 0-3-3.87M17 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Usuarios
+      </button>
+    </nav>
+
+    <div class="lateral-pie">
+      <div class="usuario-actual" id="usuario-actual"></div>
+      <div class="conexion" id="conexion"><span class="latido"></span> conectando…</div>
+      <div class="pie-botones">
+        <button class="salir" id="mi-clave">Mi clave</button>
+        <button class="salir" id="salir">Salir</button>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <div id="banner-solo-lectura" class="banner-aviso" hidden>
+      Esta sede está en <b>solo lectura</b>: podés ver todo, pero las altas, bajas y cambios
+      <b>no se envían a las puertas</b> hasta que se habilite la escritura.
+    </div>
+    <!-- ---------- Monitoreo ---------- -->
+    <section class="vista activa" id="vista-monitoreo">
+      <header class="cabecera">
+        <div>
+          <h2>En vivo</h2>
+          <p class="sub">Las marcas aparecen apenas ocurren en cualquiera de las 7 puertas</p>
+        </div>
+        <div class="metricas" id="metricas"></div>
+      </header>
+
+      <div class="dos-columnas">
+        <div>
+          <h3 class="titulillo">Puertas</h3>
+          <div class="grilla-puertas" id="grilla-puertas"></div>
+        </div>
+        <div class="columna-feed">
+          <h3 class="titulillo">
+            Marcas
+            <span class="pastilla" id="contador-feed">0</span>
+            <label class="filtro-vivo">
+              <input type="checkbox" id="solo-rechazos"> solo rechazos
+            </label>
+          </h3>
+          <div class="feed" id="feed">
+            <p class="vacio">Esperando movimiento en las puertas…</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- Puertas (control remoto) ---------- -->
+    <section class="vista" id="vista-puertas">
+      <header class="cabecera">
+        <div>
+          <h2>Puertas</h2>
+          <p class="sub">Tocá una puerta para abrirla</p>
+        </div>
+      </header>
+      <div class="grilla-remoto" id="grilla-remoto"></div>
+    </section>
+
+    <!-- ---------- Cámaras ---------- -->
+    <section class="vista" id="vista-camaras">
+      <header class="cabecera">
+        <div>
+          <h2>Cámaras</h2>
+          <p class="sub" id="sub-nvr">Cargando el NVR…</p>
+        </div>
+        <div class="acciones">
+          <select id="filtro-piso"><option value="">Todos los pisos</option></select>
+          <label class="check" title="Refresca la miniatura de cada cámara cada pocos segundos">
+            <input type="checkbox" id="mosaico-vivo" checked> Actualizar mosaico
+          </label>
+        </div>
+      </header>
+
+      <div class="visor oculto" id="visor">
+        <div class="visor-cabecera">
+          <h3 id="visor-nombre">Cámara</h3>
+          <span class="etiqueta ok" id="visor-estado">en vivo</span>
+          <span class="crecer"></span>
+          <div class="selector-calidad" id="selector-calidad">
+            <button class="boton chico activo" data-calidad="hd">HD 1080p</button>
+            <button class="boton chico" data-calidad="sub">Liviana</button>
+          </div>
+          <button class="boton chico" id="visor-cerrar">Cerrar</button>
+        </div>
+        <div class="visor-marco">
+          <video id="visor-video" autoplay muted playsinline></video>
+          <img id="visor-img" alt="" hidden>
+        </div>
+        <p class="ayuda" id="visor-nota"></p>
+      </div>
+
+      <div class="mosaico" id="mosaico"></div>
+    </section>
+
+    <!-- ---------- Personas ---------- -->
+    <section class="vista" id="vista-personas">
+      <header class="cabecera">
+        <div>
+          <h2>Personas</h2>
+          <p class="sub">Quién puede pasar por cada puerta</p>
+        </div>
+        <div class="acciones">
+          <button class="boton" id="btn-duplicados">Revisar duplicados</button>
+          <button class="boton primario accion-supervisor" id="btn-nueva">+ Nueva persona</button>
+        </div>
+      </header>
+
+      <div class="barra-filtros">
+        <input type="search" id="buscar" placeholder="Buscar por nombre, ID o documento…">
+        <select id="filtro-lector"><option value="">Todas las puertas</option></select>
+        <label class="check"><input type="checkbox" id="filtro-activos" checked> Solo activos</label>
+        <span class="crecer"></span>
+        <span class="pastilla" id="contador-personas"></span>
+      </div>
+
+      <div id="aviso-duplicados"></div>
+
+      <div class="tabla-caja">
+        <table class="tabla" id="tabla-personas"></table>
+      </div>
+    </section>
+
+    <!-- ---------- Asistencias (log de fichadas con foto) ---------- -->
+    <section class="vista" id="vista-asistencias">
+      <header class="cabecera">
+        <div>
+          <h2>Asistencias</h2>
+          <p class="sub">Registro de fichadas con la foto que saca el lector al marcar</p>
+        </div>
+        <div class="acciones">
+          <button class="boton accion-personas" id="btn-traer-marcas">Traer del lector</button>
+        </div>
+      </header>
+      <div class="barra-filtros">
+        <input type="search" id="buscar-asis" placeholder="Buscar persona o ID…">
+        <select id="filtro-lector-asis"><option value="">Todos los fichadores</option></select>
+        <select id="filtro-tipo-asis">
+          <option value="">Entrada y salida</option>
+          <option value="Entry">Solo entradas</option>
+          <option value="Exit">Solo salidas</option>
+        </select>
+        <input type="date" id="filtro-fecha-asis" title="Mostrar desde esta fecha">
+        <label class="check"><input type="checkbox" id="filtro-rechazos-asis"> Solo rechazos</label>
+        <span class="crecer"></span>
+        <span class="pastilla" id="contador-asis"></span>
+      </div>
+      <div class="lista-asistencias" id="lista-asistencias"></div>
+    </section>
+
+    <!-- ---------- Ajustes ---------- -->
+    <section class="vista" id="vista-ajustes">
+      <header class="cabecera">
+        <div>
+          <h2>Ajustes</h2>
+          <p class="sub">Perfiles de acceso y puesta en marcha</p>
+        </div>
+      </header>
+
+      <div class="tarjeta">
+        <h3>Perfiles de acceso</h3>
+        <p class="ayuda">Un perfil es un conjunto de puertas con nombre. En vez de tildar
+          puerta por puerta para cada persona, elegís el perfil.</p>
+        <div id="lista-perfiles"></div>
+        <div class="perfil-nuevo">
+          <input id="perfil-nombre" placeholder="Nombre del perfil (ej: Oficinas 4to y 5to)">
+          <div class="chips" id="perfil-lectores"></div>
+          <button class="boton primario" id="btn-guardar-perfil">Guardar perfil</button>
+        </div>
+      </div>
+
+      <div class="tarjeta">
+        <h3>Puesta en marcha</h3>
+        <p class="ayuda">Estos lectores ya venían cargados desde el SmartPSS. Traé lo que
+          ya tienen para que la base arranque reflejando la realidad.</p>
+        <div class="acciones-ajustes">
+          <button class="boton" id="btn-importar-personas">Importar padrón de los lectores</button>
+          <button class="boton" id="btn-importar-todo">Importar historial completo</button>
+          <button class="boton" id="btn-sincronizar">Forzar sincronización</button>
+        </div>
+        <pre class="salida" id="salida-ajustes"></pre>
+      </div>
+    </section>
+
+    <!-- ---------- Usuarios (solo admin) ---------- -->
+    <section class="vista" id="vista-usuarios">
+      <header class="cabecera">
+        <div>
+          <h2>Usuarios del panel</h2>
+          <p class="sub">Quién puede entrar y qué puede hacer</p>
+        </div>
+        <button class="boton primario" id="btn-nuevo-usuario">+ Nuevo usuario</button>
+      </header>
+
+      <div class="roles-info">
+        <span><b>Admin</b>: todo, incluido gestionar usuarios.</span>
+        <span><b>Supervisor</b>: altas/bajas, abrir puertas, importar.</span>
+        <span><b>Operador</b>: solo mirar.</span>
+      </div>
+
+      <div class="tabla-caja">
+        <table class="tabla" id="tabla-usuarios"></table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ============ Ficha de persona ============ -->
+<div class="cajon oculto" id="cajon">
+  <div class="cajon-fondo"></div>
+  <div class="cajon-panel">
+    <header>
+      <h3 id="cajon-titulo">Persona</h3>
+      <button class="cerrar" id="cajon-cerrar">&times;</button>
+    </header>
+    <form id="form-persona">
+      <div class="fila-foto">
+        <div class="foto" id="foto-vista"><span>Sin foto</span></div>
+        <div>
+          <label class="boton chico" for="foto-archivo">Cargar foto</label>
+          <input type="file" id="foto-archivo" accept="image/jpeg,image/png" hidden>
+          <p class="ayuda">Se guarda en el panel y se envía a los lectores donde la
+            persona tenga acceso. Tiene que ser una cara de frente y bien iluminada.</p>
+        </div>
+      </div>
+
+      <div class="rejilla">
+        <label id="fila-id">ID en el lector
+          <input id="p-id" placeholder="ej: 254">
+        </label>
+        <label>Nombre y apellido
+          <input id="p-nombre" required>
+        </label>
+        <label>Documento
+          <input id="p-documento">
+        </label>
+        <label>Sector
+          <input id="p-sector">
+        </label>
+      </div>
+
+      <label class="bloque">Perfil de acceso
+        <select id="p-perfil"><option value="">— elegir puertas a mano —</option></select>
+      </label>
+
+      <fieldset class="puertas">
+        <legend>Puertas habilitadas</legend>
+        <div id="p-lectores"></div>
+      </fieldset>
+
+      <label class="bloque">Notas
+        <textarea id="p-notas" rows="2"></textarea>
+      </label>
+
+      <label class="check"><input type="checkbox" id="p-activo" checked> Persona activa</label>
+
+      <div class="cajon-pie">
+        <button type="button" class="boton peligro accion-supervisor" id="btn-baja">Dar de baja</button>
+        <span class="crecer"></span>
+        <button type="button" class="boton" id="btn-cancelar">Cancelar</button>
+        <button type="submit" class="boton primario accion-supervisor">Guardar</button>
+      </div>
+      <p class="error" id="error-persona"></p>
+    </form>
+  </div>
+</div>
+
+<div id="avisos" class="avisos"></div>
+
+<!-- Lightbox para ver la foto de una fichada en grande -->
+<div id="lightbox" class="lightbox oculto">
+  <button class="lightbox-cerrar" aria-label="Cerrar">&times;</button>
+  <figure><img alt=""><figcaption></figcaption></figure>
+</div>
+
+<script src="/web/app.js"></script>
+</body>
+</html>

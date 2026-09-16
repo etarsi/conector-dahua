@@ -52,7 +52,10 @@ DEFAULT_PANEL = {
     # https no se puede sacar la foto de rostro desde el panel.
     "https": {
         "enabled": True,
-        "port": 443,
+        # 8443 y no 443: en este servidor el 443 lo tiene tomado HTTP.sys
+        # (el driver que usan IIS y otros servicios) y no responde. El puerto
+        # 80 redirige aca, asi que la URL que se escribe no cambia.
+        "port": 8443,
         "cert": "certs/panel.crt",
         "key": "certs/panel.key",
     },
@@ -117,9 +120,12 @@ _fh_log = RotatingFileHandler(os.path.join(logs_dir, "panel_personas.log"),
                               maxBytes=5_242_880, backupCount=3, encoding="utf-8")
 _fh_log.setFormatter(_fmt)
 root.addHandler(_fh_log)
-_sh = logging.StreamHandler(sys.stdout)
-_sh.setFormatter(_fmt)
-root.addHandler(_sh)
+# Corriendo como tarea programada con pythonw.exe no hay consola y sys.stdout
+# es None; un StreamHandler sobre eso falla en cada linea que se loguea.
+if sys.stdout is not None:
+    _sh = logging.StreamHandler(sys.stdout)
+    _sh.setFormatter(_fmt)
+    root.addHandler(_sh)
 
 try:
     from SDK_Struct import (
@@ -255,11 +261,37 @@ def equipo_zk(ip):
     return None
 
 
+def usa_grupos(clave):
+    """La sede reparte su gente entre lectores segun el tipo (fijo / eventual).
+
+    Antes esto se deducia de la tecnologia -si era ZKTeco, todos al mismo
+    lector-, pero eso dejo de servir cuando Lavalle paso de ZKTeco a Dahua. Lo
+    que define el reparto es si la sede maneja tipos, no con que protocolo
+    habla el equipo.
+    """
+    return bool(capacidades(clave).get("tipos", True))
+
+
+def ips_de_sede(clave):
+    """Todos los lectores que pertenecen a esa sede.
+
+    Cada lector declara su sede en config.json. Los que no la declaran son de
+    la sede por defecto, que es como venia cuando todos eran del Deposito.
+    """
+    nombre = (sede_de(clave).get("nombre") or clave).strip().lower()
+    ips = {d["ip"] for d in (sede_de(clave).get("devices") or [])}
+    for d in DEVICES:
+        suya = (d.get("sede") or "").strip().lower()
+        if suya == nombre or (not suya and clave == SEDE_POR_DEFECTO):
+            ips.add(d["ip"])
+    return sorted(ips)
+
+
 def ips_de_sede_persona(sede):
     """Todos los lectores de esa sede, para poder marcar los que no le tocan."""
-    if es_zkteco(sede):
+    if not usa_grupos(sede):
         return lectores_de_sede(sede)
-    return [d["ip"] for d in DEVICES]
+    return ips_de_sede(sede)
 
 
 def sede_de_lector(ip):
@@ -272,7 +304,7 @@ def sede_de_lector(ip):
 
 def lectores_para(sede, tipo):
     """En que lectores va una persona, segun su sede y (si aplica) su tipo."""
-    if es_zkteco(sede):
+    if not usa_grupos(sede):
         return lectores_de_sede(sede)
     return lectores_de_tipo(tipo)
 
@@ -290,6 +322,55 @@ def tipo_de_lector(ip):
         if ip in (grupo.get("lectores") or []):
             return tipo
     return None
+
+
+def siguiente_id_de_sede(sede):
+    """Proximo identificador libre en una sede que no pide DNI.
+
+    Se toma el mas alto que conoce el panel y se suma uno, y despues se
+    comprueba contra el lector que no este ocupado. No se reusan los huecos:
+    un numero liberado puede volver a usarse desde el equipo y terminar con
+    dos personas distintas compartiendo ID.
+
+    Antes esto se le preguntaba al ZKTeco con pyzk. Dejo de servir cuando
+    Lavalle paso a Dahua, asi que ahora se resuelve sin depender del protocolo
+    y solo se consulta al equipo para confirmar.
+    """
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            filas = conn.execute("SELECT dni FROM personas WHERE sede = ?", (sede,)).fetchall()
+        finally:
+            conn.close()
+    numeros = [int(f["dni"]) for f in filas if str(f["dni"]).isdigit()]
+    candidato = (max(numeros) + 1) if numeros else 1
+
+    ip = next(iter(lectores_para(sede, None)), None)
+    if not ip:
+        return str(candidato)
+
+    # Hasta 50 intentos: si el equipo tiene gente que el panel no conoce, se
+    # sigue subiendo hasta encontrar uno libre de verdad.
+    for _ in range(50):
+        if not _id_ocupado_en_lector(ip, str(candidato), sede):
+            return str(candidato)
+        candidato += 1
+    return str(candidato)
+
+
+def _id_ocupado_en_lector(ip, dni, sede):
+    """True si ese ID ya existe en el lector. None-safe: ante la duda, libre."""
+    try:
+        if es_zkteco(sede):
+            equipo = equipo_zk(ip)
+            return bool(equipo and lector_zkteco.existe_persona(equipo, dni))
+        login_id = _login_de(ip)
+        if not login_id:
+            return False
+        return sdk_consultar(login_id, dni) is not None
+    except Exception:
+        logging.debug(f"No se pudo consultar {dni} en {ip}", exc_info=True)
+        return False
 
 
 def vigencia_por_defecto(tipo=None):
@@ -463,7 +544,8 @@ def persona_por_dni(dni, sede):
             conn.close()
 
 
-def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes, observaciones=""):
+def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes,
+                    observaciones="", forzar_foto=False):
     """
     Crea o actualiza la persona.
 
@@ -525,6 +607,17 @@ def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes, ob
                     ON CONFLICT(sede, dni, equipo) DO UPDATE SET
                         accion = ?, estado = ?, intentos = 0, ultimo_error = NULL, actualizado = ?
                 """, (sede, dni, ip, accion, estado, ahora_txt(), accion, estado, ahora_txt()))
+
+                # Si el operador adjunto una foto, se sube si o si. Normalmente
+                # solo se manda cuando cambia respecto de la que el lector ya
+                # tiene, pero si vuelve a elegir el mismo archivo los bytes son
+                # identicos, el hash da igual y no se subia nada: desde el panel
+                # parecia que "editar no manda la foto". Olvidando lo que se
+                # creia puesto, la proxima sincronizacion la sube de nuevo.
+                if forzar_foto and ip in lectores:
+                    cr.execute(
+                        "UPDATE sincronizacion SET foto_hash = NULL "
+                        "WHERE sede = ? AND dni = ? AND equipo = ?", (sede, dni, ip))
             conn.commit()
         finally:
             conn.close()
@@ -564,7 +657,8 @@ def listar_personas(busqueda="", sede=None):
         try:
             sql = """
                 SELECT p.dni, p.nombre, p.vigencia_desde, p.vigencia_hasta, p.activo,
-                       p.foto_hash IS NOT NULL AS tiene_foto, p.actualizado, p.observaciones,
+                       p.foto_hash IS NOT NULL AS tiene_foto, p.foto_hash,
+                       p.actualizado, p.observaciones,
                        p.sede, p.tipo, p.turno, p.odoo_id, p.lectores, p.huella_cantidad, p.huella_actualizada
                 FROM personas p
             """
@@ -581,16 +675,26 @@ def listar_personas(busqueda="", sede=None):
             personas = [dict(r) for r in conn.execute(sql, args).fetchall()]
 
             sync = {}
-            for r in conn.execute("SELECT dni, equipo, accion, estado, ultimo_error FROM sincronizacion"):
-                sync.setdefault(r["dni"], {})[r["equipo"]] = {
-                    "accion": r["accion"], "estado": r["estado"], "error": r["ultimo_error"]
+            # La clave es (sede, dni) y no solo el dni: la misma persona puede
+            # estar en las dos sedes con el mismo documento, y mezclando las
+            # filas se mostraban los lectores de una en la ficha de la otra.
+            for r in conn.execute("SELECT sede, dni, equipo, accion, estado, ultimo_error, "
+                                  "foto_hash FROM sincronizacion"):
+                sync.setdefault((r["sede"], r["dni"]), {})[r["equipo"]] = {
+                    "accion": r["accion"], "estado": r["estado"], "error": r["ultimo_error"],
+                    "foto": r["foto_hash"],
                 }
             for p in personas:
-                p["sync"] = sync.get(p["dni"], {})
+                p["sync"] = sync.get((p["sede"] or SEDE_POR_DEFECTO, p["dni"]), {})
                 try:
                     p["lectores"] = json.loads(p["lectores"]) if p["lectores"] else []
                 except Exception:
                     p["lectores"] = []
+                # Si el lector ya tiene ESTA foto. Sirve para distinguir en la
+                # lista "tiene foto cargada en el panel" de "la foto ya esta en
+                # el equipo", que es lo unico que le permite fichar.
+                p["foto_en_lector"] = bool(p["foto_hash"]) and bool(p["lectores"]) and all(
+                    p["sync"].get(ip, {}).get("foto") == p["foto_hash"] for ip in p["lectores"])
             return personas
         finally:
             conn.close()
@@ -1046,9 +1150,14 @@ def aplicar_tarea(t):
 
     # La foto va despues del alta, y solo si cambio respecto de lo que ya tiene
     if t["foto"] and t["foto_hash"] != t.get("foto_puesta"):
-        ok_foto, msg_foto = sdk_foto(login_id, dni, bytes(t["foto"]))
+        foto = bytes(t["foto"])
+        ok_foto, msg_foto = sdk_foto(login_id, dni, foto)
         if not ok_foto:
             return False, f"persona creada, pero la foto fallo: {msg_foto}"
+        # Se loguea el exito, no solo el fallo: sin esta linea, mirando el log
+        # no habia forma de saber si una foto habia salido o si se habia
+        # salteado por estar ya puesta.
+        logging.info(f"Foto subida | {dni} -> {ip} ({len(foto)} bytes)")
 
     # La huella respaldada se copia al lector si ahi no esta o si cambio.
     # Asi un eventual que pasa a fijo no tiene que volver a apoyar el dedo.
@@ -1126,12 +1235,26 @@ class EmpleadosOdoo:
                 if horario:
                     valores["work_schedule_id"] = int(horario)
 
+                # active_test False a proposito: por defecto Odoo no devuelve los
+                # empleados archivados, y sin esto un reingreso creaba una ficha
+                # nueva con un DNI que ya existia. Hay que encontrarlo aunque
+                # este de baja, justamente para no duplicarlo.
                 existente = self._eje("hr.employee", "search",
-                                      [[("dni", "=", dni)]], {"limit": 1})
+                                      [[("dni", "=", dni)]],
+                                      {"limit": 1, "context": {"active_test": False}})
                 if existente:
+                    ficha = self._eje("hr.employee", "read", [existente],
+                                      {"fields": ["name", "active"],
+                                       "context": {"active_test": False}})
+                    archivado = ficha and not ficha[0].get("active")
                     self._eje("hr.employee", "write", [existente, valores])
-                    logging.info(f"Odoo: empleado actualizado | DNI={dni} {nombre} (id={existente[0]})")
-                    return True, existente[0], "actualizado en Odoo"
+                    estado = " (estaba archivado)" if archivado else ""
+                    logging.info(f"Odoo: empleado actualizado | DNI={dni} {nombre} "
+                                 f"(id={existente[0]}){estado}")
+                    detalle = "ya existia en Odoo, se actualizo"
+                    if archivado:
+                        detalle += ". La ficha estaba archivada: revisala en Odoo"
+                    return True, existente[0], detalle
 
                 nuevo = self._eje("hr.employee", "create", [valores])
                 logging.info(f"Odoo: empleado creado | DNI={dni} {nombre} (id={nuevo})")
@@ -1269,22 +1392,61 @@ class ClienteRPC2:
             pass
 
 
+def _objeto_json_alrededor(texto, pos):
+    """El objeto JSON completo que contiene la posicion dada, contando llaves.
+
+    Hace falta contar y no usar una expresion regular porque el Data del evento
+    de huella trae objetos anidados: cualquier `.*?\}` corta en la primera llave
+    que cierra, que es la de adentro, y el json queda invalido.
+    """
+    ini = texto.rfind("{", 0, pos)
+    while ini != -1:
+        nivel, en_texto, escapa = 0, False, False
+        for i in range(ini, len(texto)):
+            c = texto[i]
+            if escapa:
+                escapa = False
+                continue
+            if c == "\\":
+                escapa = True
+            elif c == '"':
+                en_texto = not en_texto
+            elif not en_texto:
+                if c == "{":
+                    nivel += 1
+                elif c == "}":
+                    nivel -= 1
+                    if nivel == 0:
+                        return texto[ini:i + 1]
+        # objeto incompleto: puede que todavia no haya llegado entero
+        ini = texto.rfind("{", 0, ini)
+    return None
+
+
 def _extraer_huella_del_evento(texto):
-    """Saca la plantilla del evento Fingerprint que emite /SubscribeNotify.cgi."""
-    if "Fingerprint" not in texto:
+    """
+    Saca la plantilla del evento Fingerprint que emite /SubscribeNotify.cgi.
+
+    Devuelve None mientras no haya un evento completo y parseable. Es importante
+    que sea None y no un crudo: quien llama sigue escuchando mientras esto de
+    None, y antes se devolvia el texto recibido hasta el momento, que al ser un
+    valor verdadero cortaba la espera a los pocos segundos -con el preambulo que
+    manda el lector al abrir el canal- sin haber visto ninguna huella.
+    """
+    if '"Fingerprint"' not in texto:
         return None
-    # El canal emite fragmentos de javascript con el evento adentro; se busca
-    # el objeto JSON que contiene el codigo Fingerprint.
-    for m in re.finditer(r'\{[^{}]*"Code"\s*:\s*"Fingerprint".*?\}(?=\s*[,\]\)])', texto, re.S):
+    for m in re.finditer(r'"Code"\s*:\s*"Fingerprint"', texto):
+        crudo = _objeto_json_alrededor(texto, m.start())
+        if not crudo:
+            continue
         try:
-            ev = json.loads(m.group(0))
+            ev = json.loads(crudo)
         except Exception:
             continue
         datos = ev.get("Data")
         if datos:
             return datos
-    # Si no se pudo parsear, se devuelve el crudo para poder diagnosticar
-    return {"_crudo": texto[:2000]}
+    return None
 
 
 def capturar_huella_en_lector(ip, dni, segundos=60):
@@ -1320,10 +1482,19 @@ def capturar_huella_en_lector(ip, dni, segundos=60):
                     acumulado = ""
                     fin = time.time() + segundos
                     while time.time() < fin and not STOP.is_set():
-                        trozo = r.read(4096)
+                        # read1 y no read: la respuesta no trae Content-Length, y
+                        # read(4096) se queda bloqueado hasta juntar los 4096 bytes.
+                        # El lector manda ~1 KB de preambulo y despues se calla
+                        # hasta que hay un evento, asi que read() no volvia nunca
+                        # y el hilo moria en el timeout sin haber leido nada.
+                        trozo = r.read1(4096)
                         if not trozo:
                             break
                         acumulado += trozo.decode("utf-8", errors="ignore")
+                        # Se guarda lo recibido aunque no se reconozca: si la
+                        # captura falla, es lo unico que permite ver si el lector
+                        # mando algo y en que formato.
+                        recibido["crudo"] = acumulado
                         datos = _extraer_huella_del_evento(acumulado)
                         if datos:
                             recibido["datos"] = datos
@@ -1353,8 +1524,25 @@ def capturar_huella_en_lector(ip, dni, segundos=60):
             logging.info(f"Huella recibida de {ip} para {dni}")
             return True, recibido["datos"], ""
         if recibido.get("error"):
+            logging.warning(f"Captura de {dni} en {ip}: se corto el canal de "
+                            f"notificaciones -> {recibido['error']}")
             return False, None, f"se corto la escucha: {recibido['error']}"
-        return False, None, "no se apoyo el dedo a tiempo"
+        crudo = (recibido.get("crudo") or "").strip()
+        # El lector manda ~1 KB de preambulo js al abrir el canal. Si aparece la
+        # palabra Fingerprint es que hubo evento pero no se pudo interpretar, que
+        # es un problema distinto de que no haya llegado nada.
+        hubo_evento = '"Fingerprint"' in crudo
+        logging.warning(
+            f"Captura de {dni} en {ip}: pasaron {segundos}s sin la huella. "
+            f"Por el canal llegaron {len(crudo)} caracteres"
+            + (" -- HUBO evento de huella pero no se pudo interpretar" if hubo_evento
+               else " (solo el preambulo: el lector no mando ningun evento)"))
+        if hubo_evento:
+            corte = crudo.find('"Fingerprint"')
+            logging.warning(f"Evento sin interpretar: {crudo[max(0, corte - 200):corte + 1800]}")
+        return False, None, ("El lector no aviso de la huella. "
+                             "Puede que no se haya apoyado el dedo, o que este "
+                             "modelo no reporte la captura por este canal.")
 
     except Exception as exc:
         logging.exception(f"Error capturando huella en {ip}")
@@ -1386,31 +1574,58 @@ def tomar_huella(dni):
         lectores = [ip for ip in lectores_para(fila["sede"], fila["tipo"])
                     if (DEV_STATE.get(ip) or {}).get("conectado")]
         if not lectores:
+            logging.warning(f"Captura de huella de {dni}: ningun lector conectado para "
+                            f"tipo '{fila['tipo']}' en {fila['sede']}")
             estado_captura(dni, estado="error",
                            mensaje="no hay ningun lector conectado para ese tipo de persona")
             return
 
-        ip = lectores[0]
-        estado_captura(dni, estado="iniciando", lector=ip,
-                       mensaje=f"Preparando el lector {ip}...")
+        # No todos los equipos tienen sensor de huella: el ASI6213S no lo trae y
+        # rechaza la orden con "Unknown error". Por eso, si uno la rechaza de
+        # entrada, se prueba con el siguiente en vez de darse por vencido.
+        ok = False
+        for n, ip in enumerate(lectores, start=1):
+            estado_captura(dni, estado="iniciando", lector=ip,
+                           mensaje=f"Preparando el lector {ip}...")
+            ok, datos, msg = capturar_huella_en_lector(ip, dni)
+            if ok:
+                break
+            logging.warning(f"Captura de huella FALLIDA | {dni} {fila['nombre']} "
+                            f"en {ip}: {msg}")
+            if "rechazo la captura" not in msg or n == len(lectores):
+                break
+            logging.info(f"{ip} no acepta capturar huella; pruebo con el siguiente")
 
-        ok, datos, msg = capturar_huella_en_lector(ip, dni)
         if not ok:
             estado_captura(dni, estado="error", mensaje=msg)
             return
 
         # El evento trae la plantilla; se guarda para que la sincronizacion la
         # replique a los demas lectores del tipo.
-        if isinstance(datos, dict) and "_crudo" in datos:
-            logging.warning(f"Evento de huella no reconocido para {dni}: {datos['_crudo'][:400]}")
-            estado_captura(dni, estado="error",
-                           mensaje="El lector envio la huella en un formato que no reconozco. "
-                                   "Quedo registrado en el log para revisarlo.")
-            return
+        logging.info(f"Evento de huella de {dni}: {_describir_evento(datos)}")
+
+        # Si el lector dice para quien es la huella, tiene que coincidir: hubo
+        # casos en que el evento llegaba con otro ID y la plantilla terminaba
+        # guardada en la persona equivocada.
+        if isinstance(datos, dict):
+            del_evento = str(datos.get("UserID") or datos.get("UserId")
+                             or datos.get("szUserID") or "").strip()
+            if del_evento and del_evento != str(dni):
+                logging.error(f"El evento de huella vino con UserID={del_evento} pero se "
+                              f"habia pedido para {dni}. No se guarda, para no asignarsela "
+                              f"a la persona equivocada.")
+                estado_captura(dni, estado="error",
+                               mensaje=f"El lector devolvio la huella del usuario {del_evento}, "
+                                       f"no la de {dni}. Volve a intentar.")
+                return
 
         plantilla = _plantilla_desde_evento(datos)
         if not plantilla:
-            estado_captura(dni, estado="error", mensaje="el evento no traia la plantilla")
+            logging.error(f"El evento de {dni} no traia una plantilla usable. "
+                          f"Contenido: {_describir_evento(datos)}")
+            estado_captura(dni, estado="error",
+                           mensaje="El lector aviso de la huella pero no mando la plantilla. "
+                                   "Quedo el detalle en el log.")
             return
 
         guardar_huella(dni, fila["sede"], plantilla)
@@ -1425,6 +1640,52 @@ def tomar_huella(dni):
         estado_captura(dni, estado="error", mensaje=str(exc))
 
 
+def _describir_evento(datos):
+    """Resumen legible del evento, para el log. No vuelca la plantilla entera."""
+    if isinstance(datos, dict):
+        partes = []
+        for k, v in datos.items():
+            if isinstance(v, str) and len(v) > 60:
+                partes.append("%s=<texto de %d caracteres>" % (k, len(v)))
+            elif isinstance(v, (dict, list)):
+                partes.append("%s=%s" % (k, str(v)[:80]))
+            else:
+                partes.append("%s=%r" % (k, v))
+        return "{" + ", ".join(partes) + "}"
+    return "%s: %s" % (type(datos).__name__, str(datos)[:200])
+
+
+def _buscar_plantilla(datos, profundidad=0):
+    """Busca, dentro del evento, una cadena que sea una plantilla en base64.
+
+    Se recorre en profundidad porque el nombre de la clave cambia segun el
+    modelo y a veces viene anidada. Se acepta solo lo que decodifique a 100
+    bytes o mas, para no confundirla con un nombre o un identificador.
+    """
+    if profundidad > 4:
+        return None
+    if isinstance(datos, str):
+        if len(datos) < 130:
+            return None
+        try:
+            if len(base64.b64decode(datos, validate=True)) >= 100:
+                return datos
+        except Exception:
+            return None
+        return None
+    if isinstance(datos, dict):
+        for v in datos.values():
+            r = _buscar_plantilla(v, profundidad + 1)
+            if r:
+                return r
+    elif isinstance(datos, (list, tuple)):
+        for v in datos:
+            r = _buscar_plantilla(v, profundidad + 1)
+            if r:
+                return r
+    return None
+
+
 def _plantilla_desde_evento(datos):
     """Arma el dict de plantilla a partir de lo que manda el evento."""
     if isinstance(datos, (bytes, bytearray)):
@@ -1436,6 +1697,12 @@ def _plantilla_desde_evento(datos):
             crudo = datos.encode()
     elif isinstance(datos, dict):
         texto = datos.get("Fingerprint") or datos.get("Data") or datos.get("Packet")
+        if not texto:
+            # Cada modelo nombra la clave a su manera y puede venir anidada, asi
+            # que si los nombres conocidos no estan se busca dentro: cualquier
+            # cadena que decodifique en base64 a algo del tamano de una
+            # plantilla sirve. Es mas robusto que mantener una lista de nombres.
+            texto = _buscar_plantilla(datos)
         if not texto:
             return None
         try:
@@ -2131,7 +2398,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "no autorizado"}, 401)
 
         if ruta == "/api/personas":
-            dni = solo_digitos(datos.get("dni"))
+            dni_crudo = (datos.get("dni") or "").strip()
+            dni = solo_digitos(dni_crudo)
             nombre = (datos.get("nombre") or "").strip()
             if not nombre:
                 return self._json({"error": "Falta el nombre"}, 400)
@@ -2169,18 +2437,22 @@ class Handler(BaseHTTPRequestHandler):
             # no se pide ni se edita, se asigna solo al dar de alta.
             if not caps.get("dni", True):
                 if not dni:
-                    ip = next(iter(lectores_para(sede, tipo)), None)
-                    equipo = equipo_zk(ip) if ip else None
-                    if not equipo:
-                        return self._json({"error": "No hay lector para asignar el ID"}, 400)
                     try:
-                        dni = lector_zkteco.siguiente_id(equipo)
+                        dni = siguiente_id_de_sede(sede)
                         logging.info(f"ID asignado automaticamente en {sede}: {dni}")
                     except Exception as exc:
                         return self._json(
-                            {"error": f"No se pudo pedir el proximo ID al lector: {exc}"}, 502)
-            elif not dni or len(dni) < 3:
-                return self._json({"error": "El DNI tiene que ser numerico"}, 400)
+                            {"error": f"No se pudo asignar el ID: {exc}"}, 502)
+            elif not dni:
+                # Se distingue "escribio letras" de "no escribio nada": antes
+                # las dos daban el mismo mensaje sobre numeros, y encima saltaba
+                # por largo -pedia 3 digitos- cuando hay identificadores de uno
+                # o dos, tanto en Lavalle como en Deposito. Con esa regla 55
+                # personas no se podian ni editar.
+                if dni_crudo:
+                    return self._json(
+                        {"error": "El DNI solo puede tener numeros, sin puntos ni letras"}, 400)
+                return self._json({"error": "Falta el DNI"}, 400)
 
             # Un DNI repetido no puede crear una persona nueva: la clave es
             # (sede, dni), asi que el alta pisaria en silencio a la que ya
@@ -2204,7 +2476,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "El turno tiene que ser dia o noche"}, 400)
 
             guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto,
-                            (datos.get("observaciones") or "").strip())
+                            (datos.get("observaciones") or "").strip(),
+                            forzar_foto=bool(foto))
             logging.info(f"Alta/edicion desde el panel: {dni} {nombre} "
                          f"(sede {sede}, {tipo or 'sin tipo'}, turno {turno or '-'})")
 
@@ -3091,10 +3364,8 @@ function aplicarCapacidades() {
   var bc = document.getElementById("btnCamara");
   if (bc) bc.classList.toggle("oculto", !(c.foto && hayCamara()));
   var info = document.getElementById("fotoInfo");
-  if (info && c.foto && !hayCamara()) {
-    info.textContent = "De frente y con buena luz. Se achica sola. " +
-      "Para sacar la foto desde acá hay que entrar por https://" + location.host + "/";
-  }
+  var prev = document.getElementById("preview");
+  if (info && !FOTO && !(prev && prev.getAttribute("src"))) info.textContent = textoAyudaFoto();
   var bh = document.getElementById("btnHuellas");
   if (bh) bh.classList.toggle("oculto", !c.huella);
   // Lavalle no tiene turno noche: se oculta el selector y queda en dia
@@ -3245,6 +3516,45 @@ function cerrarCamara() {
   if (hayCamara()) document.getElementById("btnCamara").classList.remove("oculto");
 }
 
+var AYUDA_FOTO = "De frente y con buena luz. Se achica sola.";
+
+function textoAyudaFoto() {
+  if (capacidadesSede().foto && !hayCamara()) {
+    return AYUDA_FOTO + " Para sacar la foto desde acá hay que entrar por https://"
+           + location.host + "/";
+  }
+  return AYUDA_FOTO;
+}
+
+// Las fotos NO se pueden pedir como <img src="/api/foto/...">: ese pedido lo
+// hace el navegador sin el header X-Panel-Token y el panel contesta 401, asi
+// que se veian todas rotas. Se traen con fetch y se muestran como blob.
+function ponerFoto(img, sede, dni) {
+  if (!img) return;
+  fetch("/api/foto/" + encodeURIComponent(sede) + "/" + encodeURIComponent(dni),
+        {headers: {"X-Panel-Token": TOKEN}})
+    .then(function (r) { return r.ok ? r.blob() : null; })
+    .then(function (b) {
+      if (!b) { img.removeAttribute("src"); return; }
+      var url = URL.createObjectURL(b);
+      img.onload = function () { URL.revokeObjectURL(url); };
+      img.src = url;
+    })
+    .catch(function () { img.removeAttribute("src"); });
+}
+
+// Deja el bloque de la foto como recien abierto. Antes esto estaba suelto
+// adentro de limpiar(), y editar() solo hacia FOTO = null: la miniatura y el
+// input con el archivo quedaban con lo del empleado anterior, asi que al
+// editar a un segundo empleado se veia la foto del primero.
+function limpiarFoto(texto) {
+  FOTO = null;
+  document.getElementById("foto").value = "";
+  document.getElementById("preview").removeAttribute("src");
+  document.getElementById("fotoInfo").textContent = texto || textoAyudaFoto();
+  cerrarCamara();
+}
+
 /* ---------- alta ---------- */
 function guardar() {
   var cuerpo = {
@@ -3285,8 +3595,8 @@ function mostrarFicha(p, msgOdoo) {
   document.getElementById("fichaDni").textContent =
     (capacidadesSede().dni === false ? "ID en el lector " : "DNI ") + p.dni;
   var foto = document.getElementById("fichaFoto");
-  if (p.tiene_foto) { foto.src = "/api/foto/" + SEDE + "/" + p.dni + "?t=" + Date.now(); }
-  else { foto.removeAttribute("src"); }
+  foto.removeAttribute("src");
+  if (p.tiene_foto) ponerFoto(foto, SEDE, p.dni);
   document.getElementById("fichaTags").innerHTML =
     tagTipo(p) + tagTurno(p) + tagHuella(p) + tagsLectores(p);
   var bfh = document.getElementById("fichaHuella");
@@ -3305,17 +3615,13 @@ function nuevaPersona() {
 
 function limpiar() {
   ["dni", "nombre", "desde", "hasta"].forEach(function (id) { document.getElementById(id).value = ""; });
-  document.getElementById("foto").value = "";
-  document.getElementById("preview").removeAttribute("src");
-  document.getElementById("fotoInfo").textContent = "De frente y con buena luz. Se achica sola.";
+  limpiarFoto();
   document.getElementById("tituloForm").textContent = "Nueva persona";
   document.querySelectorAll(".rbTipo").forEach(function (c) { c.checked = false; });
   DNI_EDITANDO = null;
-  cerrarCamara();
   document.getElementById("turno-day").checked = true;
   vigenciaPorDefecto();
   mostrarTipo();
-  FOTO = null;
 }
 
 /* ---------- listado ---------- */
@@ -3343,8 +3649,9 @@ function tagFoto(p) {
   // Sin rostro cargado la persona no puede fichar, asi que conviene que se
   // vea en la lista y no haya que abrir la ficha para darse cuenta.
   if (!capacidadesSede().foto) return "";
-  return p.tiene_foto ? '<span class="tag ok">con foto</span>'
-                      : '<span class="tag mal">sin foto</span>';
+  if (!p.tiene_foto) return '<span class="tag mal">sin foto</span>';
+  return p.foto_en_lector ? '<span class="tag ok">con foto</span>'
+                          : '<span class="tag espera">foto sin subir</span>';
 }
 function tagsLectores(p) {
   var s = p.sync || {};
@@ -3362,7 +3669,7 @@ function cargar() {
   api("/api/personas?sede=" + encodeURIComponent(SEDE) + "&q=" + encodeURIComponent(q)).then(function (j) {
     var html = j.personas.map(function (p) {
       var foto = p.tiene_foto
-        ? '<img class="foto-preview" src="/api/foto/' + escapar(SEDE) + '/' + escapar(p.dni) + '?t=' + Date.now() + '" alt="">'
+        ? '<img class="foto-preview" data-foto="' + escapar(p.dni) + '" alt="">'
         : '<span class="foto-preview"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/></svg></span>';
       return '<article class="persona">' + foto +
         '<div class="persona-datos">' +
@@ -3382,6 +3689,9 @@ function cargar() {
     }).join("");
     document.getElementById("lista").innerHTML = html ||
       '<div class="vacio">No hay personas todavía.<br>Probá el botón <strong>Importar</strong> para traer las que ya están en los lectores.</div>';
+    document.querySelectorAll("#lista img[data-foto]").forEach(function (img) {
+      ponerFoto(img, SEDE, img.getAttribute("data-foto"));
+    });
   }).catch(function () {});
 }
 
@@ -3403,7 +3713,15 @@ function editar(dni) {
     document.getElementById("turno-night").checked = (p.turno === "night");
     document.getElementById("turno-day").checked = (p.turno !== "night");
     mostrarTipo();
-    FOTO = null;
+    // Se muestra la foto de ESTA persona, no la que hubiera quedado antes.
+    // FOTO sigue en null a proposito: si no se elige una nueva, no se reenvia
+    // nada al lector y la que ya tiene queda como esta.
+    limpiarFoto();
+    if (p.tiene_foto) {
+      ponerFoto(document.getElementById("preview"), SEDE, p.dni);
+      document.getElementById("fotoInfo").textContent =
+        "Ya tiene foto cargada. Si elegís otra, la reemplaza.";
+    }
     window.scrollTo({top: 0, behavior: "smooth"});
   });
 }
@@ -3550,6 +3868,22 @@ if (TOKEN) {
 # =========================
 # MAIN
 # =========================
+class ServidorExclusivo(ThreadingHTTPServer):
+    """Servidor que falla si el puerto ya tiene dueno.
+
+    ThreadingHTTPServer trae allow_reuse_address = 1, y en Windows eso NO
+    significa lo mismo que en Linux: ahi permite bindear un puerto que YA esta
+    en uso en vez de dar error. Quedan dos procesos escuchando lo mismo y las
+    conexiones caen en cualquiera de los dos, asi que el sitio "esta arriba"
+    pero corta la mitad de las conexiones sin responder.
+
+    Apagandolo, si el puerto esta ocupado el bind falla, lo vemos en el log y
+    podemos seguir en http en vez de quedar a medias.
+    """
+
+    allow_reuse_address = False
+
+
 class RedirectorHTTPS(BaseHTTPRequestHandler):
     """Manda a https cualquier cosa que llegue por http.
 
@@ -3600,18 +3934,44 @@ def armar_servidores():
         return srv, None
 
     puerto = int(cfg.get("port", 443))
-    srv = ThreadingHTTPServer((PANEL["host"], puerto), Handler)
-    srv.daemon_threads = True
-    contexto = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    contexto.load_cert_chain(cert, clave)
-    srv.socket = contexto.wrap_socket(srv.socket, server_side=True)
+    try:
+        # Un reinicio rapido puede encontrar el puerto todavia cerrandose, asi
+        # que se reintenta un par de veces antes de dar por ocupado.
+        ultimo = None
+        srv = None
+        for intento in range(3):
+            try:
+                srv = ServidorExclusivo((PANEL["host"], puerto), Handler)
+                break
+            except OSError as exc:
+                ultimo = exc
+                if intento < 2:
+                    time.sleep(2)
+        if srv is None:
+            raise ultimo
+        srv.daemon_threads = True
+        contexto = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        contexto.load_cert_chain(cert, clave)
+        srv.socket = contexto.wrap_socket(srv.socket, server_side=True)
+    except Exception as exc:
+        # Que el puerto este ocupado o el certificado mal no puede dejar sin
+        # panel a RRHH. Se avisa fuerte y se sigue en http: se pierde la camara,
+        # no el panel. Antes esto tiraba la excepcion, la tarea reiniciaba el
+        # proceso y quedaba en un loop de arranques sin servidor web.
+        logging.error(f"No se pudo levantar https en el puerto {puerto}: {exc}")
+        logging.error("Se sigue en http. La camara del panel NO va a funcionar. "
+                      "Ver que ocupa el puerto con:  netstat -ano | findstr :%d" % puerto)
+        srv = ThreadingHTTPServer((PANEL["host"], int(PANEL["port"])), Handler)
+        srv.daemon_threads = True
+        logging.info(f"Panel en http://{PANEL['host']}:{PANEL['port']}/  (Ctrl+C para salir)")
+        return srv, None
     logging.info(f"Panel en https://{PANEL['host']}:{puerto}/  (Ctrl+C para salir)")
 
     # El puerto de siempre queda redirigiendo, no sirviendo el panel.
     redirector = None
     if int(PANEL["port"]) != puerto:
         try:
-            redirector = ThreadingHTTPServer((PANEL["host"], int(PANEL["port"])), RedirectorHTTPS)
+            redirector = ServidorExclusivo((PANEL["host"], int(PANEL["port"])), RedirectorHTTPS)
             redirector.daemon_threads = True
             threading.Thread(target=redirector.serve_forever,
                              name="RedirHTTP", daemon=True).start()

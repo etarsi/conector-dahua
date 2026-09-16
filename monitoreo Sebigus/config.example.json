@@ -1,0 +1,137 @@
+{
+  "_comentario": "Copiar a config.json y completar las claves. NO va al repositorio.",
+  "host": "0.0.0.0",
+  "puerto": 8090,
+  "clave_panel": "CAMBIAR",
+  "sesion_horas": 12,
+  "log_level": "INFO",
+  "max_foto_kb": 200,
+  "validez_anios": 10,
+  "vigilancia_segundos": 20,
+  "sincronizacion_segundos": 20,
+  "importar_historial_minutos": 30,
+  "sede_v1": "lavalle",
+  "asistencia": {
+    "_comentario": "Fichadores de ASISTENCIA (entrada/salida). Area aparte de las puertas. El panel solo LEE sus marcas por HTTP; la foto la lee del disco del server (capturas_dir), no la baja del equipo.",
+    "capturas_dir": "C:\\Lector\\Capturas",
+    "cada_segundos": 120,
+    "lectores": [
+      {"ip": "192.168.88.245", "sede": "deposito", "nombre": "Fichador Deposito 1", "clave": "CAMBIAR"},
+      {"ip": "192.168.88.252", "sede": "deposito", "nombre": "Fichador Deposito 2", "clave": "CAMBIAR"},
+      {"ip": "192.168.88.253", "sede": "deposito", "nombre": "Fichador Deposito 3", "clave": "CAMBIAR"},
+      {"ip": "192.168.88.254", "sede": "deposito", "nombre": "Fichador Deposito 4", "clave": "CAMBIAR"},
+      {"ip": "192.168.31.200", "sede": "lavalle", "nombre": "Fichador Lavalle", "clave": "CAMBIAR"}
+    ]
+  },
+  "sedes": {
+    "lavalle": {
+      "nombre": "Lavalle",
+      "ids": "compartidos",
+      "usuario": "admin",
+      "clave": "CAMBIAR",
+      "escritura": true,
+      "nvr": {
+        "ip": "192.168.5.2",
+        "puerto": 80,
+        "puerto_rtsp": 554,
+        "usuario": "glicht",
+        "clave": "CAMBIAR",
+        "nombre": "NVR Sebigus",
+        "modelo": "DH-NVR804-32-HDS3/I",
+        "max_canales": 32
+      },
+      "lectores": [
+        {
+          "ip": "192.168.0.73",
+          "nombre": "Entrada Deposito Rack 1",
+          "sector": "1er piso",
+          "modelo": "DHI-ASI3213A-W"
+        },
+        {
+          "ip": "192.168.0.74",
+          "nombre": "Puerta Entrada Vidrio",
+          "sector": "1er piso",
+          "modelo": "DHI-ASI3213A-W"
+        },
+        {
+          "ip": "192.168.0.240",
+          "nombre": "Fichador 2do Piso",
+          "sector": "2do piso",
+          "modelo": "DHI-ASI3214A-W"
+        },
+        {
+          "ip": "192.168.0.75",
+          "nombre": "Fichador 3er Piso",
+          "sector": "3er piso",
+          "modelo": "DHI-ASI3213A-W"
+        },
+        {
+          "ip": "192.168.0.76",
+          "nombre": "Fichador 4to Piso",
+          "sector": "4to piso",
+          "modelo": "DHI-ASI3213A-W"
+        },
+        {
+          "ip": "192.168.0.78",
+          "nombre": "Fichador 5to Piso A",
+          "sector": "5to piso",
+          "modelo": "DHI-ASI3213A-W"
+        },
+        {
+          "ip": "192.168.0.79",
+          "nombre": "Fichador 5to Piso B",
+          "sector": "5to piso",
+          "modelo": "DHI-ASI3213A-W"
+        }
+      ]
+    },
+    "deposito": {
+      "nombre": "Deposito",
+      "ids": "por_lector",
+      "usuario": "admin",
+      "clave": "CAMBIAR",
+      "escritura": false,
+      "rango_ids_nuevos": 9000,
+      "lectores": [
+        {
+          "ip": "192.168.88.251",
+          "nombre": "Insumos / Recepcion",
+          "sector": ""
+        },
+        {
+          "ip": "192.168.88.250",
+          "nombre": "Expediciones",
+          "sector": ""
+        },
+        {
+          "ip": "192.168.88.249",
+          "nombre": "Capacitacion",
+          "sector": ""
+        },
+        {
+          "ip": "192.168.88.248",
+          "nombre": "Administracion / RRHH",
+          "sector": ""
+        },
+        {
+          "ip": "192.168.88.246",
+          "nombre": "Entrada / Reja",
+          "sector": "",
+          "modelo": "DHI-ASI3213G-MW",
+          "eventos_en_vivo": false,
+          "historial": false
+        }
+      ]
+    }
+  },
+  "backup_automatico": true,
+  "backups_conservar": 14,
+  "retencion_meses": 0,
+  "guardar_fotos": true,
+  "capturas_dias": 60,
+  "https": {
+    "enabled": false,
+    "cert": "certs/panel.crt",
+    "key": "certs/panel.key"
+  }
+}

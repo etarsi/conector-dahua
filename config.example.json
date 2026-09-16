@@ -5,25 +5,38 @@
       "ip": "192.168.88.254",
       "port": 37777,
       "user": "admin",
-      "password": "CAMBIAR"
+      "password": "CAMBIAR",
+      "sede": "Deposito"
     },
     {
       "ip": "192.168.88.253",
       "port": 37777,
       "user": "admin",
-      "password": "CAMBIAR"
+      "password": "CAMBIAR",
+      "sede": "Deposito"
     },
     {
       "ip": "192.168.88.252",
       "port": 37777,
       "user": "admin",
-      "password": "CAMBIAR"
+      "password": "CAMBIAR",
+      "sede": "Deposito"
     },
     {
       "ip": "192.168.88.245",
       "port": 37777,
       "user": "admin",
-      "password": "CAMBIAR"
+      "password": "CAMBIAR",
+      "sede": "Deposito"
+    },
+    {
+      "ip": "192.168.31.200",
+      "port": 37777,
+      "user": "admin",
+      "password": "",
+      "nombre": "Lavalle",
+      "sede": "Lavalle",
+      "modelo": "DHI-ASI3213A-W"
     }
   ],
   "odoo": {
@@ -48,6 +61,7 @@
   "sdk_query_timeout_ms": 5000,
   "log_denied_events": true,
   "clock_drift_warn_minutes": 10,
+  "clock_drift_max_minutes": 60,
   "backfill": {
     "enabled": true,
     "days_on_first_run": 1,
@@ -85,18 +99,14 @@
         "nombre": "Personal fijo",
         "lectores": [
           "192.168.88.245",
-          "192.168.88.252",
-          "192.168.88.253",
-          "192.168.88.254"
+          "192.168.88.253"
         ]
       },
       "eventual": {
         "nombre": "Eventual",
         "lectores": [
-          "192.168.88.245",
-          "192.168.88.252",
-          "192.168.88.253",
-          "192.168.88.254"
+          "192.168.88.254",
+          "192.168.88.252"
         ]
       }
     },
@@ -111,14 +121,14 @@
       "turno_por_defecto": "day"
     },
     "https": {
-      "enabled": true,
-      "port": 443,
+      "enabled": false,
+      "port": 8443,
       "cert": "certs/panel.crt",
       "key": "certs/panel.key"
     }
   },
   "zkteco": {
-    "enabled": true,
+    "enabled": false,
     "host": "0.0.0.0",
     "port": 8081,
     "password": "CAMBIAR",
@@ -136,7 +146,7 @@
     "dias_primera_carga": 7
   },
   "lavalle": {
-    "enabled": true,
+    "enabled": false,
     "sede": "Lavalle",
     "devices": [
       {
@@ -161,7 +171,7 @@
       "tecnologia": "dahua",
       "capacidades": {
         "foto": true,
-        "huella": false,
+        "huella": true,
         "tipos": true,
         "turnos": true,
         "dni": true
@@ -188,20 +198,18 @@
     },
     "lavalle": {
       "nombre": "Lavalle",
-      "tecnologia": "zkteco",
+      "tecnologia": "dahua",
       "capacidades": {
-        "foto": false,
+        "foto": true,
         "huella": false,
         "tipos": false,
         "turnos": false,
-        "dni": false
+        "dni": true
       },
       "devices": [
         {
-          "ip": "192.168.0.80",
-          "puerto": 4370,
-          "password": 0,
-          "nombre": "Horus"
+          "ip": "192.168.31.200",
+          "nombre": "Lavalle"
         }
       ],
       "odoo": false
@@ -218,5 +226,6 @@
       "CL3S211160720": "Horus (Lavalle)"
     },
     "sede": "lavalle"
-  }
+  },
+  "sede_por_defecto": "Deposito"
 }

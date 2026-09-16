@@ -1,0 +1,18 @@
+# Tiene la clave de los lectores y la del panel
+config.json
+
+# Base de datos del panel. NUNCA versionarla: un pull la pisa y se pierde
+# el padron. (Ya paso en este proyecto con attendance_backup.sqlite3.)
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+logs/
+*.log
+__pycache__/
+*.pyc
+
+# El gateway de video: binario de 19 MB y su yaml, que lleva la clave del NVR
+gateway/
+certs/

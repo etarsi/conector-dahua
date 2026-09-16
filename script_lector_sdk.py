@@ -25,7 +25,7 @@ import threading
 import time
 import unicodedata
 import xmlrpc.client
-from ctypes import POINTER, byref, cast, sizeof, c_int, c_void_p
+from ctypes import POINTER, byref, cast, sizeof, string_at, c_int, c_void_p
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
@@ -66,6 +66,11 @@ DEFAULT_CONFIG = {
     # Quitar acentos/caracteres especiales del nombre antes de mandarlo a Odoo
     "normalize_name_ascii": True,
 
+    # Carpeta donde guardar la foto que el fichador saca al marcar (la lee el
+    # panel de asistencias). Se organiza igual que el equipo: <fecha>/hh/mm/archivo.jpg.
+    # "" o null = no guardar fotos.
+    "capturas_dir": r"C:\Lector\Capturas",
+
     "user_cache_minutes": 60,
     "resend_interval_seconds": 60,
     "heartbeat_minutes": 30,
@@ -77,6 +82,10 @@ DEFAULT_CONFIG = {
 
     # Avisar si la hora del evento difiere mucho de la hora del PC
     "clock_drift_warn_minutes": 10,
+    # Pasado este desfase la marca NO se manda a Odoo: queda guardada en SQLite
+    # con el motivo. Una hora es muchisimo mas de lo que puede tardar un evento
+    # en llegar, asi que si se supera es que el reloj del equipo esta mal.
+    "clock_drift_max_minutes": 60,
 
     # --- Recuperacion de marcas desde la memoria del lector ---
     # Cubre los cortes de luz del servidor: los lectores siguen guardando
@@ -161,6 +170,7 @@ def load_config() -> dict:
 
 
 CFG = load_config()
+SEDE_POR_DEFECTO = CFG.get("sede_por_defecto", "Deposito")
 
 # =========================
 # LOGGING (consola + archivo rotativo)
@@ -336,7 +346,14 @@ def sdk_time_to_datetime(sdk_time_obj):
 
 
 def device_dt_to_local(dt):
-    """Convierte la hora del equipo a hora local del PC segun configuracion."""
+    """Convierte la hora del equipo a hora local del PC segun configuracion.
+
+    Los lectores informan siempre lo que ELLOS creen que es UTC, sin importar el
+    huso que muestre la pantalla: se comprobo en un equipo puesto en huso +8 y en
+    otro puesto en Buenos Aires, y los dos entregan UTC real. Por eso la
+    conversion es una sola para todos, y cuando una marca llega corrida el
+    problema es el reloj del equipo, no esta cuenta.
+    """
     if dt is None:
         return None
     if CFG.get("device_time_is_utc", True):
@@ -482,6 +499,27 @@ def save_event(mark: dict, payload: dict):
             return None, False
         finally:
             conn.close()
+
+
+def guardar_foto_captura(snap_url, foto_bytes):
+    """Guarda la foto que el fichador saca al marcar, con la MISMA ruta/nombre que
+    reporta el equipo (szSnapURL / campo URL del historial), para que el panel de
+    asistencias la encuentre. Best-effort: si algo falla, la marca ya quedo guardada
+    y enviada a Odoo igual (esto no debe romper nunca el flujo)."""
+    base_dir = CFG.get("capturas_dir")
+    if not base_dir or not foto_bytes or not snap_url:
+        return
+    rel = snap_url.split("/SnapShotFilePath/", 1)[-1].lstrip("/\\")
+    if not rel:
+        return
+    destino = os.path.join(base_dir, *rel.replace("\\", "/").split("/"))
+    try:
+        os.makedirs(os.path.dirname(destino), exist_ok=True)
+        if not os.path.exists(destino):
+            with open(destino, "wb") as fh:
+                fh.write(foto_bytes)
+    except OSError as exc:
+        logging.debug(f"No se pudo guardar la foto de captura ({rel}): {exc}")
 
 
 def upsert_attendance(mark: dict, payload: dict):
@@ -788,6 +826,19 @@ def _sdk_get_user_name(login_id: int, user_id: str) -> str:
         return ""
 
 
+def sede_del_lector(dev_ip):
+    """Sede a la que pertenece un lector, segun config.json.
+
+    Se lee del propio device: {"ip": ..., "sede": "Lavalle"}. Si no lo trae, se
+    asume la sede por defecto, que es como venia funcionando cuando todos los
+    lectores eran del Deposito.
+    """
+    for d in CFG.get("devices", []):
+        if d.get("ip") == dev_ip:
+            return d.get("sede") or SEDE_POR_DEFECTO
+    return SEDE_POR_DEFECTO
+
+
 def resolve_user_name(login_id, dev_ip: str, user_id: str) -> str:
     """Igual que _sdk_get_user_name pero con cache, para no consultar en cada marca."""
     if not user_id or not login_id:
@@ -1074,6 +1125,21 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
             "offline": bool(isinstance(reserved, int) and reserved == 1),
         }
 
+        # Foto de captura: con bNeedPicFile=1 el SDK la manda en pBuffer. El puntero
+        # solo vale durante el callback, asi que se copia aca; el archivo se escribe
+        # en el worker (nada de I/O en este hilo). szSnapURL es la MISMA ruta que
+        # despues aparece en el historial, para que el panel case foto <-> marca.
+        mark["snap_url"] = decode_sdk_str(ev.szSnapURL)
+        mark["foto_bytes"] = b""
+        try:
+            n = int(dwBufSize)
+            if n > 0 and pBuffer:
+                datos = string_at(pBuffer, n)
+                if datos[:2] == b"\xff\xd8" and datos[-2:] == b"\xff\xd9":   # JPEG completo
+                    mark["foto_bytes"] = datos
+        except Exception:
+            pass
+
         EVENT_QUEUE.put_nowait(mark)
         bump("recibidos")
 
@@ -1090,6 +1156,7 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
 def event_worker():
     """Consume la cola: resuelve el nombre, guarda en SQLite y avisa al enviador."""
     drift_limit = int(CFG.get("clock_drift_warn_minutes", 10)) * 60
+    drift_max = int(CFG.get("clock_drift_max_minutes", 60)) * 60
 
     while not STOP.is_set() or not EVENT_QUEUE.empty():
         WATCHDOG_TICKS["worker"] = time.time()
@@ -1117,6 +1184,7 @@ def event_worker():
                 continue
 
             # Aviso si el reloj del equipo esta corrido (solo para eventos en vivo)
+            reloj_corrido = None
             if not mark["offline"] and drift_limit:
                 try:
                     delta = abs((
@@ -1127,7 +1195,18 @@ def event_worker():
                         logging.warning(
                             f"Hora del equipo {dev_ip} corrida {int(delta / 60)} min respecto del PC "
                             f"(evento={mark['check_time']}, pc={mark['received_at']}). "
-                            f"Revisar 'device_time_is_utc' o el reloj del equipo."
+                            f"Revisar el reloj del equipo."
+                        )
+                    # Avisar no alcanzaba: el 9/9/2026 el lector de Lavalle quedo
+                    # 11 horas atrasado, el aviso salio 20 veces en el log y las
+                    # marcas igual entraron a Odoo con la fecha del dia anterior,
+                    # cerrando asistencias ajenas. Una marca con esta diferencia
+                    # es basura: se guarda, pero no se manda.
+                    if drift_max and delta > drift_max:
+                        reloj_corrido = (
+                            f"No se envio: el reloj de {dev_ip} esta corrido "
+                            f"{int(delta / 60)} min (evento={mark['check_time']}, "
+                            f"pc={mark['received_at']})"
                         )
                 except Exception:
                     pass
@@ -1153,6 +1232,12 @@ def event_worker():
                 "status": mark["status"],
                 "cardType": mark["card_type"],
                 "deviceIp": dev_ip,
+                # De que sede es el lector. Odoo lo usa para saber en que campo
+                # buscar al empleado: id_lavalle o id_deposito. Cada padron es
+                # independiente y un mismo numero puede ser de otra persona en
+                # la otra sede, asi que mandarlo mal le asigna la marca a alguien
+                # que no es.
+                "sede": sede_del_lector(dev_ip),
             }
 
             _event_id, es_nueva = save_event(mark, payload)
@@ -1169,6 +1254,19 @@ def event_worker():
                 f"{mark['check_time']} | metodo={mark['open_method']} | {mark['event_subtype']}"
                 + (" | (historico)" if mark["offline"] else "")
             )
+
+            # Guardar la foto de captura en disco (solo la traen los eventos en vivo).
+            if mark.get("foto_bytes"):
+                guardar_foto_captura(mark.get("snap_url"), mark["foto_bytes"])
+
+            if reloj_corrido:
+                # Queda en SQLite con el motivo, sin tocar el backup de
+                # asistencias: cuando se arregle el reloj, el backfill la vuelve
+                # a traer con la hora buena.
+                mark_event_error(_event_id, reloj_corrido, discard=True)
+                bump("descartados_por_reloj")
+                logging.error(f"{reloj_corrido} | DNI={mark['dni']}")
+                continue
 
             upsert_attendance(mark, payload)
             NEW_EVENT.set()
@@ -1394,9 +1492,20 @@ def device_loop(dev: dict):
             state["login_id"] = int(login_id)
             logging.info(f"Login OK {ip_str} | LoginID={login_id}")
 
+            # bNeedPicFile=1: ademas del evento, el SDK entrega la FOTO de captura
+            # (pBuffer) para guardarla. Antes era 0 (sin foto). No cambia las marcas
+            # ni el envio a Odoo: solo suma la imagen en el callback.
+            need_pic = 1 if CFG.get("capturas_dir") else 0
             handle = client.sdk.CLIENT_RealLoadPictureEx(
-                C_LLONG(login_id), 0, SUBSCRIBE_TYPES, 0, AnalyzerDataCallBack, C_LDWORD(0), None
+                C_LLONG(login_id), 0, SUBSCRIBE_TYPES, need_pic, AnalyzerDataCallBack, C_LDWORD(0), None
             )
+            # Si el equipo no soporta suscribir la foto, NO perder el en-vivo:
+            # reintentar sin foto (comportamiento original).
+            if handle == 0 and need_pic:
+                logging.warning(f"Suscripcion con foto fallo en {ip_str}; reintento sin foto")
+                handle = client.sdk.CLIENT_RealLoadPictureEx(
+                    C_LLONG(login_id), 0, SUBSCRIBE_TYPES, 0, AnalyzerDataCallBack, C_LDWORD(0), None
+                )
             if handle == 0:
                 logging.error(
                     f"Suscripcion {ip_str} fallo: {client.GetLastError()} - {client.GetLastErrorMessage()}"

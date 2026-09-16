@@ -69,17 +69,29 @@ ADMS = _deep_merge(DEFAULT_ADMS, CFG.get("adms", {}))
 # =========================
 logs_dir = os.path.join(BASE_DIR, "logs")
 os.makedirs(logs_dir, exist_ok=True)
-_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(threadName)s: %(message)s")
-root = logging.getLogger()
-root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
-root.handlers.clear()
-_fh_log = RotatingFileHandler(os.path.join(logs_dir, "adms.log"),
-                              maxBytes=5_242_880, backupCount=5, encoding="utf-8")
-_fh_log.setFormatter(_fmt)
-root.addHandler(_fh_log)
-_sh = logging.StreamHandler(sys.stdout)
-_sh.setFormatter(_fmt)
-root.addHandler(_sh)
+
+
+def configurar_logging():
+    """Deja el log de este servidor en logs/adms.log.
+
+    OJO: solo se llama cuando este archivo se ejecuta directamente. El panel lo
+    importa como modulo, y antes esta configuracion corria en el import: hacia
+    root.handlers.clear() y se llevaba TODO el logging del panel a adms.log,
+    dejando panel_personas.log vacio. Costo horas de diagnostico a ciegas.
+    """
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(threadName)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    root.handlers.clear()
+    fh = RotatingFileHandler(os.path.join(logs_dir, "adms.log"),
+                             maxBytes=5_242_880, backupCount=5, encoding="utf-8")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    # Con pythonw.exe no hay consola y sys.stdout es None.
+    if sys.stdout is not None:
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
 
 DB_PATH = os.path.join(BASE_DIR, "data", "adms.sqlite3")
 DB_LOCK = threading.Lock()
@@ -402,6 +414,7 @@ def estado_equipos():
 
 
 def main():
+    configurar_logging()
     if not ADMS.get("enabled", True):
         logging.error("El servidor ADMS esta deshabilitado en config.json")
         sys.exit(1)
