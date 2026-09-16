@@ -266,6 +266,7 @@ ACCESS_ERROR_CODES = {
 # ESTADO GLOBAL
 # =========================
 client = NetClient()
+_DIAG_FOTO_N = 0        # diagnostico temporal de la foto de captura (loguea los primeros)
 
 STOP = threading.Event()
 EVENT_QUEUE = queue.Queue(maxsize=10000)
@@ -1139,6 +1140,21 @@ def AnalyzerDataCallBack(lAnalyzerHandle, dwAlarmType, pAlarmInfo, pBuffer, dwBu
                     mark["foto_bytes"] = datos
         except Exception:
             pass
+
+        # DIAGNOSTICO temporal: ver por que no se guardan fotos. Loguea los primeros
+        # eventos con el tamano del buffer, sus primeros bytes, la ruta szSnapURL y
+        # si se capturo un JPEG. (Sacar cuando la foto ande.)
+        global _DIAG_FOTO_N
+        if _DIAG_FOTO_N < 6:
+            _DIAG_FOTO_N += 1
+            try:
+                cab = string_at(pBuffer, min(int(dwBufSize or 0), 4)) if (dwBufSize and pBuffer) else b""
+            except Exception:
+                cab = b"?"
+            logging.info("DIAG-FOTO #%d ip=%s bufSize=%s cab=%r snapURL=%r jpeg=%s dir=%r",
+                         _DIAG_FOTO_N, dev_ip, int(dwBufSize or 0), cab,
+                         (mark.get("snap_url") or "")[:80], bool(mark["foto_bytes"]),
+                         CFG.get("capturas_dir"))
 
         EVENT_QUEUE.put_nowait(mark)
         bump("recibidos")
