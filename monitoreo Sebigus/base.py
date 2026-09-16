@@ -1085,6 +1085,23 @@ def adjuntar_foto_asistencia(lector, user_id, ruta, ts=None, ventana=180):
         return cx.execute(sql, args).rowcount > 0
 
 
+def asistencias_sin_foto(desde_ts, limite=300):
+    """Marcas de asistencia recientes que todavia no tienen foto (para reintentar
+    engancharla: cubre la carrera entre el poldel panel y el guardado del conector)."""
+    with conectar() as cx:
+        return [dict(f) for f in cx.execute(
+            "SELECT id, sede, lector, user_id, ts FROM asistencias"
+            " WHERE foto='' AND ts>=? ORDER BY ts DESC LIMIT ?",
+            (int(desde_ts), limite)).fetchall()]
+
+
+def poner_foto_asistencia(marca_id, ruta):
+    """Le pone la ruta de foto a una marca puntual (por id). True si actualizo."""
+    with _LOCK, conectar() as cx:
+        return cx.execute("UPDATE asistencias SET foto=? WHERE id=? AND foto=''",
+                          (ruta, marca_id)).rowcount > 0
+
+
 # ----------------------------------------------------------------------
 # Estado del lector (historial)
 # ----------------------------------------------------------------------

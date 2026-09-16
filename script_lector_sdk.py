@@ -502,25 +502,27 @@ def save_event(mark: dict, payload: dict):
             conn.close()
 
 
-def guardar_foto_captura(snap_url, foto_bytes):
-    """Guarda la foto que el fichador saca al marcar, con la MISMA ruta/nombre que
-    reporta el equipo (szSnapURL / campo URL del historial), para que el panel de
-    asistencias la encuentre. Best-effort: si algo falla, la marca ya quedo guardada
-    y enviada a Odoo igual (esto no debe romper nunca el flujo)."""
+def guardar_foto_captura(dni, check_time, foto_bytes):
+    """Guarda la foto que el fichador saca al marcar. El evento en vivo NO trae la
+    ruta (szSnapURL viene vacio), asi que la nombramos `<dni>_<unixts>.jpg` dentro de
+    la carpeta del dia; el panel de asistencias la encuentra por (dni, hora). Best-effort:
+    si algo falla, la marca ya se guardo y se envio a Odoo igual (no debe romper el flujo)."""
     base_dir = CFG.get("capturas_dir")
-    if not base_dir or not foto_bytes or not snap_url:
+    if not base_dir or not foto_bytes or not dni:
         return
-    rel = snap_url.split("/SnapShotFilePath/", 1)[-1].lstrip("/\\")
-    if not rel:
-        return
-    destino = os.path.join(base_dir, *rel.replace("\\", "/").split("/"))
+    try:
+        dt = datetime.strptime(check_time, "%Y-%m-%d %H:%M:%S") if check_time else datetime.now()
+    except (ValueError, TypeError):
+        dt = datetime.now()
+    ts = int(dt.timestamp())
+    destino = os.path.join(base_dir, dt.strftime("%Y-%m-%d"), f"{dni}_{ts}.jpg")
     try:
         os.makedirs(os.path.dirname(destino), exist_ok=True)
         if not os.path.exists(destino):
             with open(destino, "wb") as fh:
                 fh.write(foto_bytes)
     except OSError as exc:
-        logging.debug(f"No se pudo guardar la foto de captura ({rel}): {exc}")
+        logging.debug(f"No se pudo guardar la foto de captura ({destino}): {exc}")
 
 
 def upsert_attendance(mark: dict, payload: dict):
@@ -1273,7 +1275,7 @@ def event_worker():
 
             # Guardar la foto de captura en disco (solo la traen los eventos en vivo).
             if mark.get("foto_bytes"):
-                guardar_foto_captura(mark.get("snap_url"), mark["foto_bytes"])
+                guardar_foto_captura(mark["dni"], mark.get("check_time"), mark["foto_bytes"])
 
             if reloj_corrido:
                 # Queda en SQLite con el motivo, sin tocar el backup de

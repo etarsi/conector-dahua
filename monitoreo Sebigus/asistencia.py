@@ -17,6 +17,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timedelta
 
 import base
 from lector import Lector
@@ -50,37 +51,44 @@ def iniciar(cfg, parar=None):
     return len(LECTORES)
 
 
-def _foto_desde_disco(url, ts):
-    """Bytes del JPEG de captura para esa URL del historial, leyendo del disco del
-    server. None si no esta (o si la marca es vieja: no vale la pena buscar)."""
-    if not url or not CAPTURAS_DIR:
+def _foto_desde_disco(user_id, ts):
+    """Bytes del JPEG de captura de esa marca, leyendo del disco del server. El
+    conector guarda la foto como `<dni>_<unixts>.jpg` en la carpeta del dia; la
+    buscamos por (dni, hora) tomando la mas cercana en el tiempo. None si no esta
+    (o si la marca es vieja: no vale la pena buscar)."""
+    if not user_id or not ts or not CAPTURAS_DIR:
         return None
-    if ts and (time.time() - int(ts)) > DIAS_FOTO * 86400:
+    ts = int(ts)
+    if (time.time() - ts) > DIAS_FOTO * 86400:
         return None                                   # muy vieja: la foto ya no esta
-    rel = url.split("/SnapShotFilePath/", 1)[-1].lstrip("/\\")   # AAAA-MM-DD/hh/mm/xxx.jpg
-    if not rel:
-        return None
-    # 1) mapeo directo (la carpeta del server espeja la ruta del equipo)
-    directo = os.path.join(CAPTURAS_DIR, *rel.replace("\\", "/").split("/"))
-    if os.path.isfile(directo):
+    base_dt = datetime.fromtimestamp(ts)
+    pref = f"{user_id}_"
+    mejor, mejor_dist = None, 10 ** 9
+    # Se mira la carpeta del dia y las de +/- 1 dia (por si el reloj del equipo esta
+    # corrido o la marca cae cerca de medianoche).
+    for delta in (0, -1, 1):
+        carpeta = os.path.join(CAPTURAS_DIR, (base_dt + timedelta(days=delta)).strftime("%Y-%m-%d"))
+        if not os.path.isdir(carpeta):
+            continue
         try:
-            with open(directo, "rb") as fh:
+            nombres = os.listdir(carpeta)
+        except OSError:
+            continue
+        for fn in nombres:
+            if fn.startswith(pref) and fn.endswith(".jpg"):
+                try:
+                    fts = int(fn[len(pref):-4])
+                except ValueError:
+                    continue
+                dist = abs(fts - ts)
+                if dist < mejor_dist and dist <= 300:      # +/- 5 min
+                    mejor_dist, mejor = dist, os.path.join(carpeta, fn)
+    if mejor:
+        try:
+            with open(mejor, "rb") as fh:
                 return fh.read()
         except OSError:
-            pass
-    # 2) fallback: buscar el archivo por nombre dentro de la carpeta del dia
-    partes = rel.replace("\\", "/").split("/")
-    nombre = partes[-1]
-    dia = partes[0] if len(partes) > 1 else ""
-    base_dia = os.path.join(CAPTURAS_DIR, dia) if dia else CAPTURAS_DIR
-    if os.path.isdir(base_dia):
-        for raiz, _dirs, files in os.walk(base_dia):
-            if nombre in files:
-                try:
-                    with open(os.path.join(raiz, nombre), "rb") as fh:
-                        return fh.read()
-                except OSError:
-                    return None
+            return None
     return None
 
 
@@ -114,7 +122,7 @@ def sincronizar_uno(ip):
     filas = []
     for m in nuevas:
         foto_rel = ""
-        jpg = _foto_desde_disco(m.get("url"), m.get("ts"))
+        jpg = _foto_desde_disco(m.get("id"), m.get("ts"))
         if jpg:
             try:
                 foto_rel = base.guardar_foto_captura(sede, ip, m.get("id", ""), m.get("ts") or 0, jpg)
@@ -140,6 +148,28 @@ def sincronizar_sede(sede):
                if getattr(l, "_sede", "") == sede)
 
 
+def reintentar_fotos_recientes(horas=3):
+    """Marcas recientes que quedaron sin foto (porque se leyeron justo antes de que
+    el conector la guardara): se reintenta engancharla desde el disco. Devuelve cuantas."""
+    if not CAPTURAS_DIR:
+        return 0
+    desde = int(time.time()) - horas * 3600
+    n = 0
+    for m in base.asistencias_sin_foto(desde):
+        jpg = _foto_desde_disco(m["user_id"], m["ts"])
+        if not jpg:
+            continue
+        try:
+            rel = base.guardar_foto_captura(m["sede"], m["lector"], m["user_id"], m["ts"], jpg)
+        except OSError:
+            continue
+        if base.poner_foto_asistencia(m["id"], rel):
+            n += 1
+    if n:
+        log.info("Asistencia: %d foto(s) enganchadas a marcas que estaban sin foto", n)
+    return n
+
+
 def hilo_asistencia():
     """Cada `cada_segundos` recorre los fichadores y trae lo nuevo."""
     if not LECTORES:
@@ -154,6 +184,10 @@ def hilo_asistencia():
                 sincronizar_uno(ip)
             except Exception:
                 log.exception("Asistencia: error sincronizando %s", ip)
+        try:
+            reintentar_fotos_recientes()
+        except Exception:
+            log.exception("Asistencia: error reintentando fotos")
         PARAR.wait(cada)
 
 
