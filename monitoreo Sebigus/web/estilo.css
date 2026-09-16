@@ -535,6 +535,9 @@ body:not(.sec-personas) .accion-personas { display: none !important; }
 }
 .asis-datos { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
 .asis-datos b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.asis-nombre { cursor: pointer; }
+.asis-nombre:hover { color: var(--acento); text-decoration: underline; }
+.rango-fecha { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--tenue); white-space: nowrap; }
 .asis-lector { font-size: 12.5px; color: var(--tenue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .asis-meta { font-size: 11.5px; color: var(--apagado); font-family: var(--mono); }
 .asis-resultado { flex: none; }

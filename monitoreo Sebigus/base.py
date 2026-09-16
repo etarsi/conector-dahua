@@ -1034,7 +1034,7 @@ def ultimo_recno_asistencia(lector):
 
 
 def listar_asistencias(sede=None, limite=200, lector=None, tipo=None, user_id=None,
-                       desde_ts=None, solo_rechazos=False, busqueda=""):
+                       desde_ts=None, hasta_ts=None, solo_rechazos=False, busqueda=""):
     """El log de fichadas. Devuelve `tiene_foto` (no la ruta interna)."""
     sql = "SELECT * FROM asistencias WHERE 1=1"
     p = []
@@ -1048,6 +1048,8 @@ def listar_asistencias(sede=None, limite=200, lector=None, tipo=None, user_id=No
         sql += " AND user_id=?"; p.append(user_id)
     if desde_ts:
         sql += " AND ts>=?"; p.append(int(desde_ts))
+    if hasta_ts:
+        sql += " AND ts<=?"; p.append(int(hasta_ts))
     if solo_rechazos:
         sql += " AND concedido=0"
     if busqueda:

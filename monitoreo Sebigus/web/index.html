@@ -260,7 +260,9 @@
           <option value="Entry">Solo entradas</option>
           <option value="Exit">Solo salidas</option>
         </select>
-        <input type="date" id="filtro-fecha-asis" title="Mostrar desde esta fecha">
+        <button class="boton chico" id="btn-hoy-asis">Hoy</button>
+        <label class="rango-fecha">Desde <input type="date" id="filtro-desde-asis"></label>
+        <label class="rango-fecha">Hasta <input type="date" id="filtro-hasta-asis"></label>
         <label class="check"><input type="checkbox" id="filtro-rechazos-asis"> Solo rechazos</label>
         <span class="crecer"></span>
         <span class="pastilla" id="contador-asis"></span>

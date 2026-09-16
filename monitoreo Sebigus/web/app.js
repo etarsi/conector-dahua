@@ -237,7 +237,12 @@ function irA(vista) {
   $$(".vista").forEach((v) => v.classList.toggle("activa", v.id === `vista-${vista}`));
   cerrarMenu();
   if (vista === "personas") cargarPersonas();
-  if (vista === "asistencias") cargarAsistencias();
+  if (vista === "asistencias") {
+    // Al entrar, por defecto muestra HOY (no todo el historico). Si ya hay un
+    // rango elegido, se respeta.
+    if (!$("#filtro-desde-asis").value && !$("#filtro-hasta-asis").value) ponerHoyAsis();
+    cargarAsistencias();
+  }
   autoRefrescoAsistencias(vista === "asistencias");
   if (vista === "historial") cargarHistorial();
   if (vista === "registro") {
@@ -654,15 +659,23 @@ $("#btn-duplicados").addEventListener("click", async () => {
 let asisTimer = null;
 const programarAsis = () => { clearTimeout(asisTimer); asisTimer = setTimeout(cargarAsistencias, 500); };
 
+const fechaHoyLocal = () => new Date().toLocaleDateString("en-CA");   // YYYY-MM-DD local
+function ponerHoyAsis() {
+  const h = fechaHoyLocal();
+  $("#filtro-desde-asis").value = h;
+  $("#filtro-hasta-asis").value = h;
+}
+
 async function cargarAsistencias() {
   const gen = estado.generacion;
-  const params = new URLSearchParams({ limite: "300" });
+  const params = new URLSearchParams({ limite: "500" });
   if ($("#buscar-asis").value) params.set("q", $("#buscar-asis").value);
   if ($("#filtro-lector-asis").value) params.set("lector", $("#filtro-lector-asis").value);
   if ($("#filtro-tipo-asis") && $("#filtro-tipo-asis").value) params.set("tipo", $("#filtro-tipo-asis").value);
   if ($("#filtro-rechazos-asis").checked) params.set("rechazos", "1");
-  const f = $("#filtro-fecha-asis").value;
-  if (f) params.set("desde", Math.floor(new Date(`${f}T00:00:00`).getTime() / 1000));
+  const desde = $("#filtro-desde-asis").value, hasta = $("#filtro-hasta-asis").value;
+  if (desde) params.set("desde", Math.floor(new Date(`${desde}T00:00:00`).getTime() / 1000));
+  if (hasta) params.set("hasta", Math.floor(new Date(`${hasta}T23:59:59`).getTime() / 1000));
   let marcas;
   try { marcas = await apiSede(`/asistencias?${params}`); }
   catch (e) { avisar(e.message, "mal"); return; }
@@ -694,10 +707,11 @@ function tarjetaAsistencia(e) {
   const foto = e.tiene_foto
     ? `<img class="asis-foto" loading="lazy" data-foto src="/api/${estado.sede}/asistencias/${e.id}/foto" alt="Foto de la fichada">`
     : `<div class="asis-foto sin"><span>${escapar(iniciales(e.nombre))}</span></div>`;
+  const filtro = e.nombre || e.user_id || "";
   return `<div class="asis-card ${e.concedido ? "" : "no"}">
     ${foto}
     <div class="asis-datos">
-      <b>${escapar(quien)}</b>
+      <b class="asis-nombre" data-empleado="${escapar(filtro)}" title="Ver solo esta persona">${escapar(quien)}</b>
       <span class="asis-lector">${escapar(e.lector_nom || e.lector || "")}</span>
       <span class="asis-meta">${escapar(fecha)} · ${escapar(hora)}${e.metodo ? " · " + escapar(e.metodo) : ""}</span>
     </div>
@@ -712,10 +726,18 @@ $("#buscar-asis").addEventListener("input", () => { clearTimeout(temporizador); 
 $("#filtro-lector-asis").addEventListener("change", cargarAsistencias);
 $("#filtro-tipo-asis").addEventListener("change", cargarAsistencias);
 $("#filtro-rechazos-asis").addEventListener("change", cargarAsistencias);
-$("#filtro-fecha-asis").addEventListener("change", cargarAsistencias);
+$("#filtro-desde-asis").addEventListener("change", cargarAsistencias);
+$("#filtro-hasta-asis").addEventListener("change", cargarAsistencias);
+$("#btn-hoy-asis").addEventListener("click", () => { ponerHoyAsis(); cargarAsistencias(); });
 
 // Ver la foto de una fichada en grande
 $("#lista-asistencias").addEventListener("click", (ev) => {
+  const emp = ev.target.closest("[data-empleado]");
+  if (emp) {                                   // clic en el nombre: filtrar por esa persona
+    $("#buscar-asis").value = emp.dataset.empleado;
+    cargarAsistencias();
+    return;
+  }
   const img = ev.target.closest("[data-foto]");
   if (!img) return;
   const nombre = img.closest(".asis-card")?.querySelector("b")?.textContent || "";

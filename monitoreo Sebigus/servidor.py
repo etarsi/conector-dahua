@@ -334,12 +334,13 @@ class Handler(BaseHTTPRequestHandler):
             # El LOG de fichadas de los fichadores de asistencia (area aparte de las
             # puertas): entrada/salida con la foto que saca el equipo al marcar.
             return self._json(base.listar_asistencias(
-                sede=sede, limite=int((params.get("limite") or ["200"])[0]),
+                sede=sede, limite=int((params.get("limite") or ["500"])[0]),
                 lector=(params.get("lector") or [None])[0],
                 tipo=(params.get("tipo") or [None])[0],
                 user_id=(params.get("user_id") or [None])[0],
                 solo_rechazos=(params.get("rechazos") or ["0"])[0] == "1",
                 desde_ts=(params.get("desde") or [None])[0],
+                hasta_ts=(params.get("hasta") or [None])[0],
                 busqueda=(params.get("q") or [""])[0]))
         if seccion == "asistencias" and len(resto) == 3 and resto[2] == "foto":
             try:
