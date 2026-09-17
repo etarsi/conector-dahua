@@ -26,7 +26,28 @@ const estado = {
   regPersonas: [],     // gente que ficha, cargada en la sede activa
   regEditando: null,   // persona que se está editando en el registro, o null
   regFoto: null,       // foto nueva (dataURL) para el alta de asistencia
+  asisPagina: 0,       // página actual del log de asistencias (server-side)
+  usuariosPagina: 0,   // página actual de la tabla de usuarios (client-side)
 };
+
+// Paginador simple (‹ Anterior / Página N / Siguiente ›). `onIr(nuevaPagina)` se
+// llama al tocar los botones; `hayMas` habilita Siguiente. Reasigna onclick en
+// cada dibujado para no apilar listeners.
+function pintarPaginador(cont, pagina, hayMas, onIr, extra = "") {
+  if (!cont) return;
+  cont.innerHTML = (pagina === 0 && !hayMas) ? "" : `
+    <button class="boton chico" data-ir="ant" ${pagina === 0 ? "disabled" : ""}>‹ Anterior</button>
+    <span class="pag-num">Página ${pagina + 1}${extra}</span>
+    <button class="boton chico" data-ir="sig" ${hayMas ? "" : "disabled"}>Siguiente ›</button>`;
+  cont.onclick = (ev) => {
+    const b = ev.target.closest("[data-ir]");
+    if (!b) return;
+    if (b.dataset.ir === "ant" && pagina > 0) onIr(pagina - 1);
+    if (b.dataset.ir === "sig" && hayMas) onIr(pagina + 1);
+  };
+}
+const PAG_ASIS = 50;         // fichadas por página
+const PAG_USUARIOS = 20;     // usuarios por página
 const TOPE_FEED = 200;
 
 // Secciones de la app (mismas claves que base.py) y presets para el alta de
@@ -227,7 +248,7 @@ async function cambiarSede(sede, inicial = false) {
   await refrescarEstado();
   if (tiene("personas")) await cargarPersonas();
   pintarFeed();
-  if (vistaActiva() === "asistencias") cargarAsistencias();
+  if (vistaActiva() === "asistencias") recargarAsis();
   if (vistaActiva() === "historial") cargarHistorial();
   if (vistaActiva() === "registro") cargarRegistro();
   if (vistaActiva() === "camaras") cargarCamaras();
@@ -251,13 +272,13 @@ function irA(vista) {
     // Al entrar, por defecto muestra HOY (no todo el historico). Si ya hay un
     // rango elegido, se respeta.
     if (!$("#filtro-desde-asis").value && !$("#filtro-hasta-asis").value) ponerHoyAsis();
-    cargarAsistencias();
+    recargarAsis();
   }
   autoRefrescoAsistencias(vista === "asistencias");
   if (vista === "historial") cargarHistorial();
   if (vista === "registro") cargarRegistro();
   if (vista === "puertas") pintarRemoto();
-  if (vista === "usuarios") cargarUsuarios();
+  if (vista === "usuarios") { estado.usuariosPagina = 0; cargarUsuarios(); }
   if (vista === "camaras") cargarCamaras(); else pararMosaico();
 }
 $$(".nav-item").forEach((b) => b.addEventListener("click", () => irA(b.dataset.vista)));
@@ -671,13 +692,20 @@ function ponerHoyAsis() {
   $("#filtro-hasta-asis").value = h;
 }
 
+const recargarAsis = () => { estado.asisPagina = 0; cargarAsistencias(); };
+
 async function cargarAsistencias() {
   const gen = estado.generacion;
-  const params = new URLSearchParams({ limite: "500" });
+  // Se pide una de más para saber si hay página siguiente sin contar el total.
+  const params = new URLSearchParams({ limite: String(PAG_ASIS + 1),
+                                       offset: String(estado.asisPagina * PAG_ASIS) });
   if ($("#buscar-asis").value) params.set("q", $("#buscar-asis").value);
   if ($("#filtro-lector-asis").value) params.set("lector", $("#filtro-lector-asis").value);
   if ($("#filtro-tipo-asis") && $("#filtro-tipo-asis").value) params.set("tipo", $("#filtro-tipo-asis").value);
-  if ($("#filtro-rechazos-asis").checked) params.set("rechazos", "1");
+  // Por defecto se ocultan las fichadas "sin permiso" (caras no reconocidas): son ruido.
+  const resultado = $("#filtro-resultado-asis").value;
+  if (resultado === "no") params.set("rechazos", "1");
+  else if (resultado === "ok") params.set("solo_ok", "1");
   const desde = $("#filtro-desde-asis").value, hasta = $("#filtro-hasta-asis").value;
   if (desde) params.set("desde", Math.floor(new Date(`${desde}T00:00:00`).getTime() / 1000));
   if (hasta) params.set("hasta", Math.floor(new Date(`${hasta}T23:59:59`).getTime() / 1000));
@@ -685,16 +713,26 @@ async function cargarAsistencias() {
   try { marcas = await apiSede(`/asistencias?${params}`); }
   catch (e) { avisar(e.message, "mal"); return; }
   if (gen !== estado.generacion) return;
+  const hayMas = marcas.length > PAG_ASIS;      // vino la de más: hay página siguiente
+  marcas = marcas.slice(0, PAG_ASIS);
+  // Si la página quedó vacía por borrado/filtro (y no es la primera), retroceder.
+  if (!marcas.length && estado.asisPagina > 0) { estado.asisPagina--; return cargarAsistencias(); }
   // El filtro de fichador se arma con los fichadores de la sede (no las puertas).
   const val = $("#filtro-lector-asis").value;
   const fich = sedeActual().fichadores || [];
   const ops = fich.map((l) => `<option value="${escapar(l.ip)}">${escapar(l.nombre)}</option>`).join("");
   $("#filtro-lector-asis").innerHTML = `<option value="">Todos los fichadores</option>${ops}`;
   $("#filtro-lector-asis").value = val;
-  $("#contador-asis").textContent = `${marcas.length} marca(s)`;
+  const base = estado.asisPagina * PAG_ASIS;
+  $("#contador-asis").textContent = marcas.length
+    ? `${base + 1}–${base + marcas.length}` : "0 marcas";
   $("#lista-asistencias").innerHTML = marcas.length
     ? marcas.map(tarjetaAsistencia).join("")
     : '<p class="vacio">No hay fichadas para ese filtro.</p>';
+  pintarPaginador($("#pag-asis"), estado.asisPagina, hayMas, (p) => {
+    estado.asisPagina = p; cargarAsistencias();
+    $("#vista-asistencias").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
 
 // Entrada/Salida: badge según la dirección que reporta el fichador.
@@ -727,13 +765,13 @@ function tarjetaAsistencia(e) {
   </div>`;
 }
 
-$("#buscar-asis").addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(cargarAsistencias, 250); });
-$("#filtro-lector-asis").addEventListener("change", cargarAsistencias);
-$("#filtro-tipo-asis").addEventListener("change", cargarAsistencias);
-$("#filtro-rechazos-asis").addEventListener("change", cargarAsistencias);
-$("#filtro-desde-asis").addEventListener("change", cargarAsistencias);
-$("#filtro-hasta-asis").addEventListener("change", cargarAsistencias);
-$("#btn-hoy-asis").addEventListener("click", () => { ponerHoyAsis(); cargarAsistencias(); });
+$("#buscar-asis").addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(recargarAsis, 250); });
+$("#filtro-lector-asis").addEventListener("change", recargarAsis);
+$("#filtro-tipo-asis").addEventListener("change", recargarAsis);
+$("#filtro-resultado-asis").addEventListener("change", recargarAsis);
+$("#filtro-desde-asis").addEventListener("change", recargarAsis);
+$("#filtro-hasta-asis").addEventListener("change", recargarAsis);
+$("#btn-hoy-asis").addEventListener("click", () => { ponerHoyAsis(); recargarAsis(); });
 
 // Ver la foto de una fichada en grande
 $("#lista-asistencias").addEventListener("click", (ev) => {
@@ -1255,9 +1293,13 @@ const ROL_OPCIONES = [
 ];
 
 async function cargarUsuarios() {
-  let usuarios;
-  try { usuarios = await api("/api/usuarios"); }
+  try { estado._usuarios = await api("/api/usuarios"); }
   catch (e) { avisar(e.message, "mal"); return; }
+  pintarUsuarios();
+}
+
+function pintarUsuarios() {
+  const usuarios = estado._usuarios || [];
   const nombreDe = (ip) => {
     for (const s of estado.sedes) {
       const l = (s.lectores || []).find((x) => x.ip === ip);
@@ -1273,10 +1315,14 @@ async function cargarUsuarios() {
   const ve = (u) => (u.secciones || []).map((s) => (SECCIONES.find((x) => x.id === s) || {}).texto || s).join(" · ");
   const nombreSede = (c) => (estado.sedes.find((s) => s.clave === c) || {}).nombre || c;
   const veSedes = (u) => (u.sedes && u.sedes.length) ? u.sedes.map(nombreSede).join(" · ") : "todas";
+  const totalPag = Math.max(1, Math.ceil(usuarios.length / PAG_USUARIOS));
+  if (estado.usuariosPagina >= totalPag) estado.usuariosPagina = totalPag - 1;
+  const desde = estado.usuariosPagina * PAG_USUARIOS;
+  const pagina = usuarios.slice(desde, desde + PAG_USUARIOS);
   $("#tabla-usuarios").innerHTML = `
     <thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Secciones</th><th>Sedes</th><th>Abre puertas</th><th>Estado</th>
       <th>Último acceso</th><th></th></tr></thead>
-    <tbody>${usuarios.map((u) => `
+    <tbody>${pagina.map((u) => `
       <tr class="${u.activo ? "" : "baja"}">
         <td class="num">${escapar(u.usuario)}${u.usuario === estado.usuario ? ' <span class="pastilla">vos</span>' : ""}</td>
         <td>${escapar(u.nombre || "—")}</td>
@@ -1292,7 +1338,8 @@ async function cargarUsuarios() {
             `<button class="boton chico peligro" data-borrar-usuario="${escapar(u.usuario)}">Borrar</button>`}
         </td>
       </tr>`).join("")}</tbody>`;
-  estado._usuarios = usuarios;
+  pintarPaginador($("#pag-usuarios"), estado.usuariosPagina, desde + PAG_USUARIOS < usuarios.length,
+    (p) => { estado.usuariosPagina = p; pintarUsuarios(); }, ` de ${totalPag}`);
 }
 
 $("#btn-nuevo-usuario").addEventListener("click", async () => {

@@ -269,11 +269,16 @@
         <button class="boton chico" id="btn-hoy-asis">Hoy</button>
         <label class="rango-fecha">Desde <input type="date" id="filtro-desde-asis"></label>
         <label class="rango-fecha">Hasta <input type="date" id="filtro-hasta-asis"></label>
-        <label class="check"><input type="checkbox" id="filtro-rechazos-asis"> Solo rechazos</label>
+        <select id="filtro-resultado-asis" title="Qué fichadas mostrar">
+          <option value="ok">Con permiso</option>
+          <option value="">Todas</option>
+          <option value="no">Solo sin permiso</option>
+        </select>
         <span class="crecer"></span>
         <span class="pastilla" id="contador-asis"></span>
       </div>
       <div class="lista-asistencias" id="lista-asistencias"></div>
+      <div class="paginador" id="pag-asis"></div>
     </section>
 
     <!-- ---------- Ajustes ---------- -->
@@ -329,6 +334,7 @@
       <div class="tabla-caja">
         <table class="tabla" id="tabla-usuarios"></table>
       </div>
+      <div class="paginador" id="pag-usuarios"></div>
     </section>
   </main>
 </div>

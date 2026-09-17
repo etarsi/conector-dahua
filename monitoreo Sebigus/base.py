@@ -1036,9 +1036,14 @@ def ultimo_recno_asistencia(lector):
     return int(fila[0] or 0)
 
 
-def listar_asistencias(sede=None, limite=200, lector=None, tipo=None, user_id=None,
-                       desde_ts=None, hasta_ts=None, solo_rechazos=False, busqueda=""):
-    """El log de fichadas. Devuelve `tiene_foto` (no la ruta interna)."""
+def listar_asistencias(sede=None, limite=200, offset=0, lector=None, tipo=None, user_id=None,
+                       desde_ts=None, hasta_ts=None, solo_rechazos=False,
+                       ocultar_rechazos=False, busqueda=""):
+    """El log de fichadas. Devuelve `tiene_foto` (no la ruta interna).
+
+    `ocultar_rechazos` deja solo las fichadas con permiso (lo normal para RRHH:
+    las 'entrada sin permiso' -caras no reconocidas- son ruido). `solo_rechazos`
+    es lo contrario, para auditar. Si vienen los dos, manda `solo_rechazos`."""
     sql = "SELECT * FROM asistencias WHERE 1=1"
     p = []
     if sede:
@@ -1055,9 +1060,11 @@ def listar_asistencias(sede=None, limite=200, lector=None, tipo=None, user_id=No
         sql += " AND ts<=?"; p.append(int(hasta_ts))
     if solo_rechazos:
         sql += " AND concedido=0"
+    elif ocultar_rechazos:
+        sql += " AND concedido=1"
     if busqueda:
         sql += " AND (nombre LIKE ? OR user_id LIKE ?)"; p += [f"%{busqueda}%", f"%{busqueda}%"]
-    sql += " ORDER BY ts DESC, id DESC LIMIT ?"; p.append(int(limite))
+    sql += " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?"; p += [int(limite), int(offset)]
     with conectar() as cx:
         filas = []
         for f in cx.execute(sql, p).fetchall():
