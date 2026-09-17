@@ -33,6 +33,7 @@ import asistencia
 import base
 import gateway
 import nucleo
+import registro
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
@@ -52,6 +53,7 @@ _SECCION_GET = {
     "personas": ("personas",),
     "eventos": ("en_vivo", "asistencias"),
     "asistencias": ("asistencias",),
+    "registro": ("registro",),
     "duplicados": ("personas",),
     "perfiles": ("personas",),
     "camaras": ("camaras",),
@@ -66,6 +68,7 @@ _SECCION_POST = {
     "reintentar_credenciales": ("personas",),
     "abrir": ("puertas",),
     "asistencias": ("asistencias",),
+    "registro": ("registro",),
 }
 
 log = logging.getLogger("monitoreo")
@@ -382,12 +385,56 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "max-age=300")
             self.end_headers()
             return self.wfile.write(imagen)
+        if seccion == "registro":
+            return self._registro_get(sede, resto[1:], params)
         if seccion == "duplicados":
             return self._json(nucleo.duplicados(sede))
         if seccion == "perfiles":
             return self._json(base.listar_perfiles(sede))
         if seccion == "camaras":
             return self._get_camaras(sede, resto[1:])
+        return self._error("no encontrado", 404)
+
+    # ---------------- registro de asistencia (puente al panel de personas) ----
+    def _registro_get(self, sede, resto, params):
+        try:
+            if not resto:
+                return self._json({"personas": registro.listar(sede, (params.get("q") or [""])[0])})
+            if resto[0] == "opciones":
+                return self._json(registro.opciones())
+            if resto[0] == "persona" and len(resto) >= 3 and resto[2] == "foto":
+                imagen = registro.foto(sede, resto[1])
+                if not imagen:
+                    return self._error("sin foto", 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(imagen)))
+                self.send_header("Cache-Control", "max-age=60")
+                self.end_headers()
+                return self.wfile.write(imagen)
+        except registro.RegistroError as e:
+            return self._error(str(e), e.codigo)
+        except Exception:
+            log.exception("registro GET %s", resto)
+            return self._error("no se pudo consultar el panel de personas", 502)
+        return self._error("no encontrado", 404)
+
+    def _registro_post(self, sede, resto, datos):
+        try:
+            if resto and resto[0] == "baja":
+                dni = str(datos.get("dni") or "").strip()
+                if not dni:
+                    return self._error("falta el DNI", 400)
+                return self._json(registro.baja(sede, dni))
+            if not resto:
+                cuerpo = dict(datos or {})
+                cuerpo["sede"] = sede       # la sede la fija el server, no el navegador
+                return self._json(registro.alta(cuerpo))
+        except registro.RegistroError as e:
+            return self._error(str(e), e.codigo)
+        except Exception:
+            log.exception("registro POST %s", resto)
+            return self._error("no se pudo guardar en el panel de personas", 502)
         return self._error("no encontrado", 404)
 
     def _archivo(self, ruta, tipo):
@@ -623,13 +670,18 @@ class Handler(BaseHTTPRequestHandler):
         if necesita and not self._exigir_seccion(*necesita):
             return
 
-        # "abrir" (rol + puertas asignadas) y "asistencias" (solo dispara una
-        # lectura, no escribe) tienen su propio control. El resto pide supervisor+.
-        if seccion not in ("abrir", "asistencias") and not self._exigir("supervisor"):
+        # "abrir" (rol + puertas asignadas), "asistencias" (solo dispara una
+        # lectura) y "registro" (lo habilita la seccion, no el rol: un RRHH sin
+        # rango puede cargar gente) tienen su propio control. El resto pide
+        # supervisor+.
+        if seccion not in ("abrir", "asistencias", "registro") and not self._exigir("supervisor"):
             return
 
         if seccion == "asistencias" and len(resto) >= 2 and resto[1] == "sincronizar":
             return self._json({"nuevas": asistencia.sincronizar_sede(sede)})
+
+        if seccion == "registro":
+            return self._registro_post(sede, resto[1:], datos)
 
         if seccion == "personas" and len(resto) == 1:
             return self._guardar_persona(sede, None, datos)
@@ -892,6 +944,7 @@ def main():
     nucleo.arrancar(CFG)
     if asistencia.arrancar(CFG, nucleo.PARAR):
         log.info("Asistencia: lectura de fichadores activada")
+    registro.configurar(CFG)
 
     servidor = ThreadingHTTPServer((CFG.get("host", "0.0.0.0"), puerto), Handler)
     servidor.daemon_threads = True

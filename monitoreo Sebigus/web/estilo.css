@@ -475,12 +475,33 @@ body[data-rol="operador"] .accion-supervisor { display: none !important; }
 /* Sin la sección "personas" no se ven sus botones (la verdad la impone el server). */
 body:not(.sec-personas) .accion-personas { display: none !important; }
 
-/* Registro de asistencia embebido (reusa el panel de personas dentro del monitoreo) */
-.marco-registro {
-  border: 1px solid var(--borde); border-radius: var(--r); overflow: hidden;
-  background: var(--fondo-2); height: calc(100vh - 150px); min-height: 480px;
+/* Registrar asistencia (alta/baja nativa de la gente que ficha) */
+.lista-registro { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.reg-card {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px; width: 100%;
+  background: var(--tarjeta); border: 1px solid var(--borde); border-radius: var(--r);
+  border-left: 3px solid var(--ok); text-align: left; cursor: pointer;
+  color: var(--texto); font-family: inherit;
 }
-.marco-registro iframe { width: 100%; height: 100%; border: 0; display: block; }
+.reg-card:hover { border-color: var(--acento); }
+.reg-card.inactivo { border-left-color: var(--apagado); opacity: .7; }
+.reg-foto {
+  width: 50px; height: 50px; border-radius: 8px; object-fit: cover; flex: none;
+  background: var(--fondo-2); border: 1px solid var(--borde-2);
+}
+.reg-foto.sin { display: grid; place-items: center; font-size: 15px; font-weight: 600; color: var(--tenue); }
+.reg-datos { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.reg-datos b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reg-meta { font-size: 12px; color: var(--tenue); font-family: var(--mono); }
+.reg-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+.reg-estado { flex: none; }
+.chip-reg {
+  font-size: 11px; padding: 2px 8px; border-radius: 20px;
+  border: 1px solid var(--borde-2); color: var(--tenue); white-space: nowrap;
+}
+.chip-reg.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-suave); }
+.chip-reg.espera { color: var(--alerta); border-color: rgba(210,153,34,.4); background: rgba(210,153,34,.12); }
+.chip-reg.baja { color: var(--error); border-color: var(--error); background: var(--error-suave); }
 
 /* Presets de secciones en el formulario de usuario */
 .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
@@ -590,7 +611,7 @@ body:not(.sec-personas) .accion-personas { display: none !important; }
   .rejilla { grid-template-columns: 1fr; }
   .cabecera h2 { font-size: 19px; }
   .metricas { width: 100%; }
-  .lista-asistencias, .grilla-remoto { grid-template-columns: 1fr; }
+  .lista-asistencias, .lista-registro, .grilla-remoto { grid-template-columns: 1fr; }
   input[type=search] { min-width: 0; flex: 1; }
   .barra-filtros { gap: 7px; }
   .cajon-panel { width: 100vw; }

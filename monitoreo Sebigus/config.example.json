@@ -23,6 +23,11 @@
       {"ip": "192.168.31.200", "sede": "lavalle", "nombre": "Fichador Lavalle", "clave": "CAMBIAR"}
     ]
   },
+  "registro": {
+    "_comentario": "OPCIONAL. Alta/baja de gente que ficha: es un puente al panel de personas (que hace el alta en los fichadores + Odoo). Si se deja vacio, la URL y la clave se toman solas del config.json del panel (../config.json, seccion panel). Completar solo para forzar otra URL o clave.",
+    "base_url": "",
+    "password": ""
+  },
   "sedes": {
     "lavalle": {
       "nombre": "Lavalle",

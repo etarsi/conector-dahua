@@ -22,6 +22,10 @@ const estado = {
   fotoNueva: null,
   fuente: null,
   secciones: [],       // secciones habilitadas para este usuario
+  regOpciones: null,   // tipos/turnos/capacidades de la sede (registro de asistencia)
+  regPersonas: [],     // gente que ficha, cargada en la sede activa
+  regEditando: null,   // persona que se está editando en el registro, o null
+  regFoto: null,       // foto nueva (dataURL) para el alta de asistencia
 };
 const TOPE_FEED = 200;
 
@@ -219,11 +223,13 @@ async function cambiarSede(sede, inicial = false) {
   // aviso de sede en solo lectura: lo que se cargue no se envía a las puertas
   const banner = $("#banner-solo-lectura");
   if (banner) banner.hidden = !sedeActual().solo_lectura;
+  cerrarCajonReg(); estado.regOpciones = null;   // las opciones (tipos) son por sede
   await refrescarEstado();
   if (tiene("personas")) await cargarPersonas();
   pintarFeed();
   if (vistaActiva() === "asistencias") cargarAsistencias();
   if (vistaActiva() === "historial") cargarHistorial();
+  if (vistaActiva() === "registro") cargarRegistro();
   if (vistaActiva() === "camaras") cargarCamaras();
 }
 
@@ -235,6 +241,10 @@ function irA(vista) {
   if (item && item.hidden) vista = primeraVista();
   $$(".nav-item").forEach((b) => b.classList.toggle("activo", b.dataset.vista === vista));
   $$(".vista").forEach((v) => v.classList.toggle("activa", v.id === `vista-${vista}`));
+  // El aviso de "solo lectura" es sobre las PUERTAS: no aplica a asistencias ni
+  // al registro (van a los fichadores igual), donde solo confundiría.
+  const banner = $("#banner-solo-lectura");
+  if (banner) banner.hidden = !sedeActual().solo_lectura || vista === "registro" || vista === "asistencias";
   cerrarMenu();
   if (vista === "personas") cargarPersonas();
   if (vista === "asistencias") {
@@ -245,12 +255,7 @@ function irA(vista) {
   }
   autoRefrescoAsistencias(vista === "asistencias");
   if (vista === "historial") cargarHistorial();
-  if (vista === "registro") {
-    // El registro reusa el panel de personas (backend probado), embebido. Vive en
-    // el :80 del mismo server. Se carga una sola vez, al entrar.
-    const fr = $("#registro-frame");
-    if (fr && !fr.getAttribute("src")) fr.src = `http://${location.hostname}/`;
-  }
+  if (vista === "registro") cargarRegistro();
   if (vista === "puertas") pintarRemoto();
   if (vista === "usuarios") cargarUsuarios();
   if (vista === "camaras") cargarCamaras(); else pararMosaico();
@@ -559,7 +564,7 @@ $("#cajon-cerrar").addEventListener("click", cerrarCajon);
 $("#btn-cancelar").addEventListener("click", cerrarCajon);
 $(".cajon-fondo").addEventListener("click", cerrarCajon);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { cerrarCajon(); cerrarLightbox(); cerrarMenu(); }
+  if (e.key === "Escape") { cerrarCajon(); cerrarCajonReg(); cerrarLightbox(); cerrarMenu(); }
 });
 
 // La foto se convierte a JPEG y se achica ACÁ (en el navegador) a lo que pide el
@@ -803,6 +808,184 @@ $("#buscar-hist").addEventListener("input", () => { clearTimeout(temporizador); 
 $("#filtro-lector-hist").addEventListener("change", cargarHistorial);
 $("#filtro-rechazos-hist").addEventListener("change", cargarHistorial);
 $("#filtro-fecha-hist").addEventListener("change", cargarHistorial);
+
+// ---------------------------------------------------------------- registrar asistencia
+// Alta/baja de la gente que ficha. El backend lo resuelve el panel de personas
+// (probado, toca Odoo y los fichadores): acá es una vista nativa que llama a
+// /api/<sede>/registro. No hay segundo login: manda la sección "registro".
+
+// Qué campos pide cada sede (Depósito maneja tipo fijo/eventual y turno; Lavalle
+// no). Sale de /registro/opciones, con un fallback conservador por las dudas.
+function capsRegistro() {
+  const s = (estado.regOpciones && estado.regOpciones.sedes[estado.sede]) || {};
+  return s.capacidades || { tipos: false, turnos: false, dni: true, foto: true };
+}
+
+async function cargarRegistro() {
+  const gen = estado.generacion;
+  if (!estado.regOpciones) {
+    try { estado.regOpciones = await apiSede("/registro/opciones"); }
+    catch (e) { $("#lista-registro").innerHTML = `<p class="vacio">${escapar(e.message)}</p>`; return; }
+    if (gen !== estado.generacion) return;
+  }
+  let personas;
+  try { personas = (await apiSede(`/registro?q=${encodeURIComponent($("#buscar-reg").value || "")}`)).personas; }
+  catch (e) { $("#lista-registro").innerHTML = `<p class="vacio">${escapar(e.message)}</p>`; return; }
+  if (gen !== estado.generacion) return;
+  estado.regPersonas = personas;
+  $("#contador-reg").textContent = `${personas.length} persona(s)`;
+  $("#lista-registro").innerHTML = personas.length
+    ? personas.map(tarjetaRegistro).join("")
+    : '<p class="vacio">Todavía no hay nadie cargado en esta sede.</p>';
+}
+
+function tarjetaRegistro(p) {
+  const foto = p.tiene_foto
+    ? `<img class="reg-foto" loading="lazy" src="/api/${estado.sede}/registro/persona/${encodeURIComponent(p.dni)}/foto" alt="">`
+    : `<div class="reg-foto sin"><span>${escapar(iniciales(p.nombre))}</span></div>`;
+  const chips = [];
+  const grupos = (estado.regOpciones && estado.regOpciones.grupos) || {};
+  if (p.tipo) chips.push(`<span class="chip-reg">${escapar((grupos[p.tipo] || {}).nombre || p.tipo)}</span>`);
+  if (p.turno) chips.push(`<span class="chip-reg">${p.turno === "night" ? "Noche" : "Día"}</span>`);
+  const pendiente = Object.values(p.sync || {}).some((s) => s.estado === "pendiente");
+  let estadoTxt = '<span class="chip-reg ok">cargado</span>';
+  if (!p.activo) estadoTxt = '<span class="chip-reg baja">dado de baja</span>';
+  else if (pendiente) estadoTxt = '<span class="chip-reg espera">sincronizando…</span>';
+  return `<button class="reg-card ${p.activo ? "" : "inactivo"}" data-dni="${escapar(p.dni)}">
+    ${foto}
+    <div class="reg-datos">
+      <b>${escapar(p.nombre)}</b>
+      <span class="reg-meta">DNI ${escapar(p.dni)}</span>
+      <div class="reg-chips">${chips.join("")}</div>
+    </div>
+    <div class="reg-estado">${estadoTxt}</div>
+  </button>`;
+}
+
+$("#buscar-reg").addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(cargarRegistro, 250); });
+$("#lista-registro").addEventListener("click", (ev) => {
+  const card = ev.target.closest("[data-dni]");
+  if (card) editarFichaje(card.dataset.dni);
+});
+
+// --- formulario (cajón) ---
+function aplicarCapsRegistro() {
+  const caps = capsRegistro();
+  // Tipo (fijo/eventual): solo donde la sede lo maneja
+  const grupos = (estado.regOpciones && estado.regOpciones.grupos) || {};
+  $("#reg-fila-tipo").hidden = !caps.tipos;
+  $("#reg-tipo").innerHTML = '<option value="">— elegir —</option>' +
+    Object.entries(grupos).map(([k, g]) => `<option value="${escapar(k)}">${escapar(g.nombre || k)}</option>`).join("");
+  // Turno: solo donde la sede lo maneja (si no, va "día" por defecto)
+  $("#reg-fila-turno").hidden = !caps.turnos;
+  // Foto: solo si el lector la acepta
+  $("#reg-foto-controles").hidden = caps.foto === false;
+  $("#reg-foto-vista").hidden = caps.foto === false;
+}
+
+function abrirCajonReg() {
+  aplicarCapsRegistro();
+  $("#error-registro").textContent = "";
+  $("#cajon-reg").classList.remove("oculto");
+}
+function cerrarCajonReg() { $("#cajon-reg").classList.add("oculto"); }
+
+$("#btn-nuevo-fichaje").addEventListener("click", () => {
+  estado.regEditando = null; estado.regFoto = null;
+  $("#form-registro").reset();
+  $("#cajon-reg-titulo").textContent = "Nueva persona";
+  $("#reg-foto-vista").innerHTML = "<span>Sin foto</span>";
+  $("#reg-dni").disabled = false;
+  $("#btn-baja-reg").classList.add("oculto");
+  abrirCajonReg();
+});
+
+function editarFichaje(dni) {
+  const p = (estado.regPersonas || []).find((x) => String(x.dni) === String(dni));
+  if (!p) return;
+  estado.regEditando = p; estado.regFoto = null;
+  $("#form-registro").reset();
+  $("#cajon-reg-titulo").textContent = p.nombre || "Persona";
+  $("#reg-dni").value = p.dni || "";
+  $("#reg-dni").disabled = true;               // el DNI es la clave: no se cambia al editar
+  $("#reg-nombre").value = p.nombre || "";
+  $("#reg-notas").value = p.observaciones || "";
+  aplicarCapsRegistro();
+  if (p.tipo) $("#reg-tipo").value = p.tipo;
+  if (p.turno) $("#reg-turno").value = p.turno;
+  $("#reg-foto-vista").innerHTML = p.tiene_foto
+    ? `<img src="/api/${estado.sede}/registro/persona/${encodeURIComponent(p.dni)}/foto?t=${Date.now()}" alt="">`
+    : "<span>Sin foto</span>";
+  $("#btn-baja-reg").classList.toggle("oculto", !p.activo);
+  $("#error-registro").textContent = "";
+  $("#cajon-reg").classList.remove("oculto");
+}
+
+$("#cajon-reg-cerrar").addEventListener("click", cerrarCajonReg);
+$("#btn-cancelar-reg").addEventListener("click", cerrarCajonReg);
+$("#cajon-reg-fondo").addEventListener("click", cerrarCajonReg);
+
+// Foto: se achica en el navegador a lo que pide el lector (el server no tiene
+// librerías de imagen). Mismo tratamiento que en Personas.
+$("#reg-foto-archivo").addEventListener("change", (ev) => {
+  const archivo = ev.target.files[0];
+  if (!archivo) return;
+  const fr = new FileReader();
+  fr.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const MAX = 720;
+      let { width: w, height: h } = img;
+      if (Math.max(w, h) > MAX) { const k = MAX / Math.max(w, h); w = Math.round(w * k); h = Math.round(h * k); }
+      const cv = document.createElement("canvas");
+      cv.width = w; cv.height = h;
+      cv.getContext("2d").drawImage(img, 0, 0, w, h);
+      let jpeg, q = 0.92;
+      do { jpeg = cv.toDataURL("image/jpeg", q); q -= 0.08; } while (jpeg.length > 90 * 1024 * 1.37 && q > 0.4);
+      estado.regFoto = jpeg;
+      $("#reg-foto-vista").innerHTML = `<img src="${jpeg}" alt="">`;
+    };
+    img.onerror = () => avisar("No se pudo leer esa imagen", "mal");
+    img.src = fr.result;
+  };
+  fr.readAsDataURL(archivo);
+});
+
+$("#form-registro").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("#error-registro").textContent = "";
+  const caps = capsRegistro();
+  const cuerpo = {
+    dni: $("#reg-dni").value.trim(),
+    nombre: $("#reg-nombre").value.trim(),
+    observaciones: $("#reg-notas").value.trim(),
+  };
+  if (caps.tipos) cuerpo.tipo = $("#reg-tipo").value;
+  if (caps.turnos) cuerpo.turno = $("#reg-turno").value;
+  if (estado.regEditando) cuerpo.editando = estado.regEditando.dni;   // permite guardar con el mismo DNI
+  if (estado.regFoto) cuerpo.foto_base64 = estado.regFoto;
+  const btn = ev.submitter; if (btn) btn.disabled = true;
+  try {
+    const r = await apiSede("/registro", { method: "POST", body: JSON.stringify(cuerpo) });
+    cerrarCajonReg();
+    let msg = `${cuerpo.nombre} guardado`;
+    if (r.aviso) msg += ` (ojo: ${r.aviso})`;
+    avisar(msg, r.aviso ? "" : "ok");
+    cargarRegistro();
+  } catch (e) { $("#error-registro").textContent = e.message; }
+  finally { if (btn) btn.disabled = false; }
+});
+
+$("#btn-baja-reg").addEventListener("click", async () => {
+  const p = estado.regEditando;
+  if (!p) return;
+  if (!await confirmar("Se lo saca de los fichadores. Deja de poder marcar asistencia.",
+      { titulo: `¿Dar de baja a ${p.nombre}?`, ok: "Dar de baja", peligro: true })) return;
+  try {
+    await apiSede("/registro/baja", { method: "POST", body: JSON.stringify({ dni: p.dni }) });
+    cerrarCajonReg(); avisar(`${p.nombre} dado de baja`, "ok"); cargarRegistro();
+  } catch (e) { avisar(e.message, "mal"); }
+});
 
 // ---------------------------------------------------------------- perfiles
 function pintarPerfiles() {
