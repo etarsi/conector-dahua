@@ -53,10 +53,8 @@ body {
   padding: 32px 28px;
   box-shadow: var(--sombra);
 }
-.login-marca { display: flex; align-items: center; gap: 10px; }
-.login-marca h1 { font-size: 19px; font-weight: 500; margin: 0; }
-.login-marca b { font-weight: 700; }
-.login-ayuda { color: var(--tenue); font-size: 13px; margin: 6px 0 22px; }
+.login-logo { display: block; width: 210px; max-width: 80%; height: auto; margin: 2px auto 6px; }
+.login-ayuda { color: var(--tenue); font-size: 13px; margin: 4px 0 22px; text-align: center; }
 .login-caja input {
   width: 100%; padding: 11px 13px; margin-bottom: 12px;
   background: var(--fondo-2); border: 1px solid var(--borde-2);
@@ -86,10 +84,9 @@ body {
   display: flex; flex-direction: column; gap: 22px;
   position: sticky; top: 0; height: 100vh;
 }
-.marca { display: flex; align-items: center; gap: 10px; padding: 0 8px; }
-.marca div { display: flex; flex-direction: column; line-height: 1.2; }
-.marca strong { font-size: 15px; }
-.marca span { font-size: 12px; color: var(--tenue); }
+.marca { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 8px 0; }
+.marca-logo { width: 100%; max-width: 168px; height: auto; display: block; }
+.marca-sub { font-size: 11px; color: var(--tenue); letter-spacing: .12em; text-transform: uppercase; }
 
 nav { display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
@@ -569,7 +566,8 @@ body:not(.sec-personas) .accion-personas { display: none !important; }
   display: grid; place-items: center;
 }
 .menu-boton svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-.barra-marca { display: flex; align-items: center; gap: 9px; font-size: 15px; }
+.barra-marca { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--tenue); }
+.barra-logo { height: 26px; width: auto; display: block; }
 
 /* ---------------- Responsive: móvil / tablet ---------------- */
 /* En móvil/tablet el menú lateral pasa a ser un cajón que se abre con el botón
