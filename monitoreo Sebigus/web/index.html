@@ -164,23 +164,17 @@
       </div>
     </section>
 
-    <!-- ---------- Registrar asistencia (nativo: alta en fichadores + Odoo) ---------- -->
+    <!-- ---------- Registrar asistencia (reusa el panel de personas, embebido sin login) ---------- -->
     <section class="vista" id="vista-registro">
       <header class="cabecera">
         <div>
           <h2>Registrar asistencia</h2>
           <p class="sub">Alta de personas que fichan (se cargan en los fichadores y en Odoo)</p>
         </div>
-        <div class="acciones">
-          <button class="boton primario" id="btn-nuevo-fichaje">+ Nueva persona</button>
-        </div>
       </header>
-      <div class="barra-filtros">
-        <input type="search" id="buscar-reg" placeholder="Buscar por nombre o DNI…">
-        <span class="crecer"></span>
-        <span class="pastilla" id="contador-reg"></span>
+      <div class="marco-registro">
+        <iframe id="registro-frame" title="Registro de asistencias" loading="lazy"></iframe>
       </div>
-      <div class="lista-registro" id="lista-registro"></div>
     </section>
 
     <!-- ---------- Cámaras ---------- -->
@@ -395,58 +389,6 @@
         <button type="submit" class="boton primario accion-supervisor">Guardar</button>
       </div>
       <p class="error" id="error-persona"></p>
-    </form>
-  </div>
-</div>
-
-<!-- ============ Alta de persona que ficha (asistencia) ============ -->
-<div class="cajon oculto" id="cajon-reg">
-  <div class="cajon-fondo" id="cajon-reg-fondo"></div>
-  <div class="cajon-panel">
-    <header>
-      <h3 id="cajon-reg-titulo">Nueva persona</h3>
-      <button class="cerrar" id="cajon-reg-cerrar">&times;</button>
-    </header>
-    <form id="form-registro">
-      <div class="fila-foto">
-        <div class="foto" id="reg-foto-vista"><span>Sin foto</span></div>
-        <div id="reg-foto-controles">
-          <label class="boton chico" for="reg-foto-archivo">Cargar foto</label>
-          <input type="file" id="reg-foto-archivo" accept="image/jpeg,image/png" hidden>
-          <p class="ayuda">Cara de frente y bien iluminada: se usa para el reconocimiento
-            facial del fichador.</p>
-        </div>
-      </div>
-
-      <div class="rejilla">
-        <label>DNI
-          <input id="reg-dni" inputmode="numeric" autocomplete="off" placeholder="ej: 30111222">
-        </label>
-        <label>Nombre y apellido
-          <input id="reg-nombre" required>
-        </label>
-        <label id="reg-fila-tipo">Tipo
-          <select id="reg-tipo"></select>
-        </label>
-        <label id="reg-fila-turno">Turno
-          <select id="reg-turno">
-            <option value="day">Día</option>
-            <option value="night">Noche</option>
-          </select>
-        </label>
-      </div>
-
-      <label class="bloque">Notas
-        <textarea id="reg-notas" rows="2"></textarea>
-      </label>
-
-      <div class="cajon-pie">
-        <button type="button" class="boton peligro oculto" id="btn-baja-reg">Dar de baja</button>
-        <span class="crecer"></span>
-        <button type="button" class="boton" id="btn-cancelar-reg">Cancelar</button>
-        <button type="submit" class="boton primario">Guardar</button>
-      </div>
-      <p class="error" id="error-registro"></p>
     </form>
   </div>
 </div>

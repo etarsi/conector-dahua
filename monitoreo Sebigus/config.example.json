@@ -24,7 +24,7 @@
     ]
   },
   "registro": {
-    "_comentario": "OPCIONAL. Alta/baja de gente que ficha: es un puente al panel de personas (que hace el alta en los fichadores + Odoo). Si se deja vacio, la URL y la clave se toman solas del config.json del panel (../config.json, seccion panel). Completar solo para forzar otra URL o clave.",
+    "_comentario": "OPCIONAL. 'Registrar asistencia' embebe el panel de personas SIN pedir su clave: el server entra solo y le pasa un token al iframe. Si se deja vacio, la URL y la clave del panel se toman solas de ../config.json (seccion panel). Completar solo para forzar otra URL o clave.",
     "base_url": "",
     "password": ""
   },

@@ -3168,7 +3168,21 @@ PAGINA = r"""<!doctype html>
 </div>
 
 <script>
-let TOKEN = sessionStorage.getItem("panelToken") || "";
+// El monitoreo embebe este panel (iframe) sin volver a pedir la clave: entra
+// por su cuenta y pasa un token ya valido por la URL (?panelToken=...). Se
+// guarda y se limpia de la barra para no dejarlo a la vista. Sin ese parametro,
+// el panel funciona como siempre (pide la clave).
+let TOKEN = (function () {
+  try {
+    var t = new URLSearchParams(location.search).get("panelToken");
+    if (t) {
+      sessionStorage.setItem("panelToken", t);
+      history.replaceState(null, "", location.pathname);
+      return t;
+    }
+  } catch (e) {}
+  return sessionStorage.getItem("panelToken") || "";
+})();
 let FOTO = null;
 let GRUPOS = {};
 let SEDES = {};

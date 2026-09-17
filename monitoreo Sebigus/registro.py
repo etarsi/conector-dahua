@@ -24,7 +24,7 @@ import ssl
 import threading
 import urllib.error
 import urllib.request
-from urllib.parse import urlencode
+from urllib.parse import urlparse
 
 log = logging.getLogger("monitoreo.registro")
 
@@ -127,55 +127,22 @@ def _asegurar_token():
         return bool(_TOKEN) or _login()      # otro hilo pudo entrar mientras esperaba
 
 
-def _llamar(metodo, ruta, cuerpo=None, binario=False):
-    """Llama renovando el login una sola vez si el token vencio (401)."""
+# ---------------------------------------------------------------- API publica
+def token_iframe():
+    """Un token ya valido del panel viejo + como armar su URL, para embeberlo
+    (iframe) sin volver a pedir la clave. La pagina de monitoreo arma
+    <scheme>://<host>:<port>/?panelToken=<token>; el panel lo levanta de la URL
+    y salta su pantalla de login. El alta/baja lo sigue haciendo el panel viejo.
+    """
     global _TOKEN
     if not disponible():
         raise RegistroError("el registro de asistencia no esta configurado en el servidor", 503)
     if not _asegurar_token():
-        raise RegistroError("no se pudo autenticar con el panel de personas", 502)
-    status, datos, ctype = _bruto(metodo, ruta, cuerpo, binario)
-    if status == 401:
+        # El token pudo vencer: se fuerza un login nuevo.
         with _LOCK:
             _TOKEN = None
-            if not _login():
-                raise RegistroError("no se pudo autenticar con el panel de personas", 502)
-        status, datos, ctype = _bruto(metodo, ruta, cuerpo, binario)
-    return status, datos, ctype
-
-
-def _o_error(status, datos, ok=(200,)):
-    if status in ok:
-        return datos
-    raise RegistroError((datos or {}).get("error") or f"error {status}", status)
-
-
-# ---------------------------------------------------------------- API publica
-def listar(sede, q=""):
-    """Personas de esa sede cargadas en el panel viejo."""
-    status, datos, _ = _llamar("GET", "/api/personas?" + urlencode({"sede": sede, "q": q or ""}))
-    return _o_error(status, datos).get("personas", [])
-
-
-def opciones():
-    """Grupos (tipos) y capacidades por sede, para armar el formulario."""
-    status, datos, _ = _llamar("GET", "/api/equipos")
-    datos = _o_error(status, datos)
-    return {"grupos": datos.get("grupos", {}), "sedes": datos.get("sedes", {})}
-
-
-def foto(sede, dni):
-    """La foto de rostro guardada, o None."""
-    status, crudo, _ = _llamar("GET", f"/api/foto/{sede}/{dni}", binario=True)
-    return crudo if status == 200 else None
-
-
-def alta(datos):
-    """Alta/edicion. `datos` ya trae la sede (la pone el server, no el navegador)."""
-    status, resp, _ = _llamar("POST", "/api/personas", datos)
-    return _o_error(status, resp)
-
-
-def baja(sede, dni):
-    status, resp, _ = _llamar("POST", "/api/baja", {"sede": sede, "dni": dni})
-    return _o_error(status, resp)
+        if not _asegurar_token():
+            raise RegistroError("no se pudo autenticar con el panel de personas", 502)
+    u = urlparse(_CFG["base_url"])
+    puerto = u.port or (443 if u.scheme == "https" else 80)
+    return {"token": _TOKEN, "scheme": u.scheme or "https", "port": puerto}
