@@ -137,12 +137,19 @@ def token_iframe():
     global _TOKEN
     if not disponible():
         raise RegistroError("el registro de asistencia no esta configurado en el servidor", 503)
-    if not _asegurar_token():
-        # El token pudo vencer: se fuerza un login nuevo.
-        with _LOCK:
+    with _LOCK:
+        # El panel guarda las sesiones EN MEMORIA: si se reinicio, el token que
+        # teniamos ya no vale y el iframe caia en la pantalla de "Clave de acceso".
+        # Se prueba contra el panel antes de entregarlo; si no sirve, se entra de nuevo.
+        valido = False
+        if _TOKEN:
+            status, _, _ = _bruto("GET", "/api/equipos")
+            valido = status == 200
+        if not valido:
             _TOKEN = None
-        if not _asegurar_token():
-            raise RegistroError("no se pudo autenticar con el panel de personas", 502)
+            if not _login():
+                raise RegistroError("no se pudo autenticar con el panel de personas", 502)
+        token = _TOKEN
     u = urlparse(_CFG["base_url"])
     puerto = u.port or (443 if u.scheme == "https" else 80)
-    return {"token": _TOKEN, "scheme": u.scheme or "https", "port": puerto}
+    return {"token": token, "scheme": u.scheme or "https", "port": puerto}
