@@ -23,6 +23,8 @@ const estado = {
   fuente: null,
   secciones: [],       // secciones habilitadas para este usuario
   asisPagina: 0,       // página actual del log de asistencias (server-side)
+  regsPagina: 0,       // página actual de Registrados (server-side)
+  regsIniciado: false, // la primera vez Registrados arranca en "hoy"
   usuariosPagina: 0,   // página actual de la tabla de usuarios (client-side)
 };
 
@@ -43,6 +45,7 @@ function pintarPaginador(cont, pagina, hayMas, onIr, extra = "") {
   };
 }
 const PAG_ASIS = 50;         // fichadas por página
+const PAG_REGS = 48;         // registrados por página
 const PAG_USUARIOS = 20;     // usuarios por página
 const TOPE_FEED = 200;
 
@@ -229,6 +232,9 @@ async function cambiarSede(sede, inicial = false) {
   estado.sede = sede;
   estado.generacion++;
   try { localStorage.setItem("sede", sede); } catch (e) {}
+  // La lista de Registrados de la otra sede no puede quedar a la vista (ni
+  // dejar borrar desde ella) mientras se carga la nueva
+  limpiarRegs();
   // limpiar todo lo de la sede anterior
   cerrarCajon(); estado.editando = null;
   cerrarVisor(); pararMosaico(); estado.camaras = [];
@@ -238,28 +244,34 @@ async function cambiarSede(sede, inicial = false) {
   $('.nav-item[data-vista="camaras"]').hidden = !(conNvr && tiene("camaras"));
   if (!conNvr && vistaActiva() === "camaras") irA(primeraVista());
   // aviso de sede en solo lectura: lo que se cargue no se envía a las puertas
-  const banner = $("#banner-solo-lectura");
-  if (banner) banner.hidden = !sedeActual().solo_lectura;
-  await refrescarEstado();
+  pintarBannerSoloLectura(vistaActiva());
+  // Un usuario solo de "registro" no puede leer /estado (403): eso no tiene que
+  // cortar la recarga de su vista
+  await refrescarEstado().catch(() => {});
   if (tiene("personas")) await cargarPersonas();
   pintarFeed();
   if (vistaActiva() === "asistencias") recargarAsis();
+  if (vistaActiva() === "registrados") recargarRegs();
   if (vistaActiva() === "historial") cargarHistorial();
   if (vistaActiva() === "camaras") cargarCamaras();
 }
 
 // ---------------------------------------------------------------- navegación
 const vistaActiva = () => ($(".vista.activa") || {}).id?.replace("vista-", "");
+// El aviso de "solo lectura" es sobre las PUERTAS: no aplica a lo de asistencia
+// (registro, registrados, log), que va a los fichadores igual; ahí solo confundiría.
+function pintarBannerSoloLectura(vista) {
+  const banner = $("#banner-solo-lectura");
+  if (banner) banner.hidden = !sedeActual().solo_lectura ||
+    ["registro", "registrados", "asistencias"].includes(vista);
+}
 function irA(vista) {
   // No entrar a una vista cuya sección no tiene (por si se invoca a mano).
   const item = $(`.nav-item[data-vista="${vista}"]`);
   if (item && item.hidden) vista = primeraVista();
   $$(".nav-item").forEach((b) => b.classList.toggle("activo", b.dataset.vista === vista));
   $$(".vista").forEach((v) => v.classList.toggle("activa", v.id === `vista-${vista}`));
-  // El aviso de "solo lectura" es sobre las PUERTAS: no aplica a asistencias ni
-  // al registro (van a los fichadores igual), donde solo confundiría.
-  const banner = $("#banner-solo-lectura");
-  if (banner) banner.hidden = !sedeActual().solo_lectura || vista === "registro" || vista === "asistencias";
+  pintarBannerSoloLectura(vista);
   cerrarMenu();
   if (vista === "personas") cargarPersonas();
   if (vista === "asistencias") {
@@ -271,6 +283,11 @@ function irA(vista) {
   autoRefrescoAsistencias(vista === "asistencias");
   if (vista === "historial") cargarHistorial();
   if (vista === "registro") abrirRegistro();
+  if (vista === "registrados") {
+    // La primera vez arranca en HOY (los nuevos del día); después respeta lo elegido.
+    if (!estado.regsIniciado) { ponerHoyRegs(); estado.regsIniciado = true; }
+    recargarRegs();
+  }
   if (vista === "puertas") pintarRemoto();
   if (vista === "usuarios") { estado.usuariosPagina = 0; cargarUsuarios(); }
   if (vista === "camaras") cargarCamaras(); else pararMosaico();
@@ -806,6 +823,249 @@ function autoRefrescoAsistencias(on) {
   if (refrescoAsis) { clearInterval(refrescoAsis); refrescoAsis = null; }
   if (on) refrescoAsis = setInterval(() => { if (vistaActiva() === "asistencias") cargarAsistencias(); }, 60000);
 }
+
+// ---------------------------------------------------------------- registrados
+// La gente cargada en los fichadores de asistencia (la que da de alta "Registrar
+// asistencia"): quién se registró hoy o entre fechas, fijo o eventual, si ya está
+// en Odoo, y borrar a los dados de baja. Los datos son del panel de personas: el
+// server los trae por su puente, la sede la fija la URL.
+let regsTimer = null;
+function ponerHoyRegs() {
+  const h = fechaHoyLocal();
+  $("#filtro-desde-regs").value = h;
+  $("#filtro-hasta-regs").value = h;
+}
+const recargarRegs = () => { estado.regsPagina = 0; cargarRegistrados(); };
+function limpiarRegs() {
+  $("#lista-regs").innerHTML = ""; $("#contador-regs").textContent = "";
+  $("#resumen-regs").innerHTML = ""; $("#pag-regs").innerHTML = "";
+  $("#btn-eliminar-bajas").hidden = true;
+}
+
+function filtrosRegs() {
+  const p = new URLSearchParams();
+  const val = (sel) => $(sel).value.trim();
+  if (val("#buscar-regs")) p.set("q", val("#buscar-regs"));
+  if (val("#filtro-desde-regs")) p.set("desde", val("#filtro-desde-regs"));
+  if (val("#filtro-hasta-regs")) p.set("hasta", val("#filtro-hasta-regs"));
+  if (val("#filtro-tipo-regs")) p.set("tipo", val("#filtro-tipo-regs"));
+  p.set("estado", val("#filtro-estado-regs") || "activos");
+  if (val("#filtro-odoo-regs")) p.set("odoo", val("#filtro-odoo-regs"));
+  return p;
+}
+
+async function cargarRegistrados() {
+  const gen = estado.generacion;
+  const params = filtrosRegs();
+  params.set("limite", String(PAG_REGS));
+  params.set("offset", String(estado.regsPagina * PAG_REGS));
+  let r;
+  try { r = await apiSede(`/registrados?${params}`); }
+  catch (e) {
+    if (gen !== estado.generacion) return;
+    $("#lista-regs").innerHTML = `<p class="vacio">${escapar(e.message)}</p>`;
+    $("#contador-regs").textContent = ""; $("#resumen-regs").innerHTML = "";
+    $("#pag-regs").innerHTML = ""; $("#btn-eliminar-bajas").hidden = true;
+    return;
+  }
+  if (gen !== estado.generacion) return;
+  // Filtros que la sede no maneja (Lavalle: sin tipos ni Odoo): se esconden, y si
+  // venían puestos de la otra sede se sacan y se vuelve a pedir.
+  const sobraTipo = !r.tipos && $("#filtro-tipo-regs").value;
+  const sobraOdoo = !r.sede_odoo && $("#filtro-odoo-regs").value;
+  $("#filtro-tipo-regs").hidden = !r.tipos;
+  $("#filtro-odoo-regs").hidden = !r.sede_odoo;
+  if (sobraTipo || sobraOdoo) {
+    if (sobraTipo) $("#filtro-tipo-regs").value = "";
+    if (sobraOdoo) $("#filtro-odoo-regs").value = "";
+    return recargarRegs();
+  }
+  const c = r.conteo || {};
+  const personas = r.personas || [];
+  // Página vacía porque se borró gente (y no es la primera): ir a la última que hay.
+  if (!personas.length && estado.regsPagina > 0) {
+    estado.regsPagina = Math.max(0, Math.ceil((c.total || 0) / PAG_REGS) - 1);
+    return cargarRegistrados();
+  }
+  estado.regsOdoo = r.sede_odoo; estado.regsTipos = r.tipos;
+  const base = estado.regsPagina * PAG_REGS;
+  $("#contador-regs").textContent = `${c.total || 0} persona${c.total === 1 ? "" : "s"}`;
+  pintarResumenRegs(c, r.tipos);
+  const elim = $("#btn-eliminar-bajas");
+  elim.hidden = !c.bajas_eliminables;
+  elim.textContent = `Eliminar dados de baja (${c.bajas_eliminables || 0})`;
+  $("#lista-regs").innerHTML = personas.length ? personas.map(tarjetaRegistrado).join("") : vacioRegs();
+  const paginas = Math.max(1, Math.ceil((c.total || 0) / PAG_REGS));
+  pintarPaginador($("#pag-regs"), estado.regsPagina, base + personas.length < (c.total || 0), (p) => {
+    estado.regsPagina = p; cargarRegistrados();
+    $("#vista-registrados").scrollIntoView({ behavior: "smooth", block: "start" });
+  }, ` de ${paginas}`);
+}
+
+function vacioRegs() {
+  const d = $("#filtro-desde-regs").value, h = $("#filtro-hasta-regs").value, hoy = fechaHoyLocal();
+  const conFechas = d || h;
+  const texto = (d === hoy && h === hoy) ? "Hoy no se registró nadie con estos filtros."
+    : conFechas ? "Nadie se registró en esas fechas con estos filtros." : "No hay nadie con estos filtros.";
+  return `<div class="vacio">${escapar(texto)}${conFechas
+    ? ' <button class="boton chico" data-regs-todas>Ver todas las fechas</button>' : ""}</div>`;
+}
+
+// Chips con los totales; tocarlos aplica ese filtro. Fijos/eventuales se cuentan
+// sin el filtro de tipo y activos/bajas sin el de estado: dicen qué hay en cada uno.
+function pintarResumenRegs(c, tipos) {
+  const tipo = $("#filtro-tipo-regs").value, est = $("#filtro-estado-regs").value;
+  const chip = (attr, valor, texto, n, activo) =>
+    `<button class="chip-filtro ${activo ? "activo" : ""}" data-${attr}="${valor}">${escapar(texto)} <b>${n || 0}</b></button>`;
+  const partes = [];
+  if (tipos) {
+    partes.push(chip("regs-tipo", "fijo", "Fijos", c.fijos, tipo === "fijo"));
+    partes.push(chip("regs-tipo", "eventual", "Eventuales", c.eventuales, tipo === "eventual"));
+    if (c.sin_tipo) partes.push(chip("regs-tipo", "sin", "Sin tipo", c.sin_tipo, tipo === "sin"));
+    partes.push('<span class="sep"></span>');
+  }
+  partes.push(chip("regs-estado", "activos", "Activos", c.activos, est === "activos"));
+  partes.push(chip("regs-estado", "bajas", "Dados de baja", c.bajas, est === "bajas"));
+  $("#resumen-regs").innerHTML = partes.join("");
+}
+
+// "2026-10-01 14:13:05" -> "hoy 14:13" / "ayer 14:13" / "28/09/2026 14:13"
+function fechaAlta(txt) {
+  if (!txt) return "";
+  const [f, h = ""] = txt.split(" ");
+  const ayer = new Date(); ayer.setDate(ayer.getDate() - 1);
+  const hora = h.slice(0, 5);
+  if (f === fechaHoyLocal()) return `hoy ${hora}`;
+  if (f === ayer.toLocaleDateString("en-CA")) return `ayer ${hora}`;
+  const [a, m, d] = f.split("-");
+  return `${d}/${m}/${a} ${hora}`;
+}
+
+function chipOdooReg(p) {
+  if (!estado.regsOdoo || !p.activo) return "";
+  const t = escapar(p.odoo_error || "");
+  if (p.odoo_estado === "baja") return `<span class="etiqueta error" title="${t}">Odoo: de baja</span>`;
+  if (p.odoo_estado === "sin_dni") return `<span class="etiqueta pendiente" title="${t}">sin DNI para Odoo</span>`;
+  if (p.odoo_estado === "conflicto") return `<span class="etiqueta error" title="${t}">Odoo: revisar</span>`;
+  // Vinculada, pero el último cambio no llegó: lo termina el envío automático
+  if (p.odoo_id && (p.odoo_estado === "error" || p.odoo_campos || p.odoo_reactivar))
+    return `<span class="etiqueta pendiente" title="${t}">Odoo: pendiente</span>`;
+  if (p.odoo_id) return '<span class="etiqueta ok">en Odoo</span>';
+  return `<span class="etiqueta pendiente" title="${t}">falta en Odoo</span>`;
+}
+
+function tarjetaRegistrado(p) {
+  const foto = p.tiene_foto
+    ? `<img class="asis-foto" loading="lazy" data-foto src="/api/${estado.sede}/registrados/${encodeURIComponent(p.dni)}/foto?v=${encodeURIComponent(p.actualizado || p.fecha_alta || "")}" alt="Foto de ${escapar(p.nombre)}">`
+    : `<div class="asis-foto sin"><span>${escapar(iniciales(p.nombre))}</span></div>`;
+  const datos = [`DNI ${p.dni}`];
+  if (estado.regsTipos && p.turno) datos.push(p.turno === "night" ? "noche" : "día");
+  const chips = [];
+  if (!p.activo) chips.push('<span class="etiqueta error">de baja</span>');
+  if (estado.regsTipos) {
+    if (p.tipo === "fijo") chips.push('<span class="etiqueta tipo-fijo">fijo</span>');
+    else if (p.tipo === "eventual") chips.push('<span class="etiqueta tipo-eventual">eventual</span>');
+    else chips.push('<span class="etiqueta pendiente">sin tipo</span>');
+  }
+  chips.push(chipOdooReg(p));
+  const s = p.sync || {};
+  if (p.activo && s.error) chips.push(`<span class="etiqueta error">falló en ${s.error} lector(es)</span>`);
+  else if (p.activo && s.pendiente) chips.push('<span class="etiqueta pendiente">cargando en lectores</span>');
+  if (p.importado) chips.push(`<span class="etiqueta" title="${escapar(p.observaciones || "")}">importado</span>`);
+  const pie = p.activo ? ""
+    : p.se_puede_eliminar
+      ? `<button class="boton chico peligro accion-supervisor reg-eliminar" data-eliminar-reg="${escapar(p.dni)}" data-nombre="${escapar(p.nombre)}">Eliminar</button>`
+      : `<span class="reg-motivo" title="Todavía no se puede eliminar">${escapar(p.motivo)}</span>`;
+  return `<div class="asis-card reg-card ${p.activo ? "" : "no"}">
+    ${foto}
+    <div class="asis-datos">
+      <b title="${escapar(p.nombre)}">${escapar(p.nombre)}</b>
+      <span class="asis-lector">${escapar(datos.join(" · "))}</span>
+      <span class="asis-meta">alta ${escapar(fechaAlta(p.fecha_alta))}</span>
+      ${pie}
+    </div>
+    <div class="reg-chips">${chips.join("")}</div>
+  </div>`;
+}
+
+// Siempre contra la sede de la lista que se mostró y se confirmó, no la que esté
+// elegida al momento del POST: los mismos números son otras personas en la otra sede.
+async function eliminarRegistrados(lista, sede) {
+  const r = await api(`/api/${sede}/registrados/eliminar`, { method: "POST",
+    body: JSON.stringify({ dnis: lista.map((p) => p.dni) }) });
+  const ok = (r.eliminados || []).length, no = r.rechazados || [];
+  if (ok) avisar(`${ok} persona(s) eliminada(s) del panel`, "ok");
+  if (no.length) avisar(`No se eliminó: ${no.map((x) => `${x.nombre || x.dni} (${x.motivo})`).join("; ")}`, "mal");
+  if (sede === estado.sede) cargarRegistrados();
+}
+const nombreSede = (sede) => (estado.sedes.find((s) => s.clave === sede) || {}).nombre || sede;
+
+const AVISO_ELIMINAR = "Se borra del panel de registro junto con su foto y su huella guardadas " +
+  "(si vuelve a entrar, se la carga de nuevo). Ya no está en ningún lector. Odoo no se toca.";
+const AVISO_ELIMINAR_VARIAS = "Se borran del panel de registro junto con sus fotos y huellas guardadas " +
+  "(si alguien vuelve a entrar, se lo carga de nuevo). Ya no están en ningún lector. Odoo no se toca.";
+
+$("#btn-eliminar-bajas").addEventListener("click", async (ev) => {
+  const b = ev.currentTarget;
+  const sede = estado.sede, gen = estado.generacion;
+  b.disabled = true;
+  try {
+    // Todas las bajas eliminables de la sede, sin los filtros de la pantalla
+    const r = await api(`/api/${sede}/registrados?estado=bajas&solo_eliminables=1&limite=500`);
+    if (gen !== estado.generacion) return;              // se cambió de sede mientras tanto
+    const lista = r.personas || [];
+    if (!lista.length) { avisar("No hay dados de baja para eliminar"); cargarRegistrados(); return; }
+    const nombres = lista.slice(0, 12).map((p) => `• ${p.nombre} (${p.dni})`).join("\n") +
+      (lista.length > 12 ? `\n… y ${lista.length - 12} más` : "");
+    const aviso = lista.length === 1 ? AVISO_ELIMINAR : AVISO_ELIMINAR_VARIAS;
+    if (!await confirmar(`${nombreSede(sede)}: ${lista.length} persona(s) dada(s) de baja. ${aviso}\n\n${nombres}`,
+        { titulo: `Eliminar dados de baja de ${nombreSede(sede)}`, ok: `Eliminar ${lista.length}`,
+          peligro: true })) return;
+    if (gen !== estado.generacion) return;
+    await eliminarRegistrados(lista, sede);
+  } catch (e) { avisar(e.message, "mal"); }
+  finally { b.disabled = false; }
+});
+
+$("#lista-regs").addEventListener("click", async (ev) => {
+  if (ev.target.closest("[data-regs-todas]")) {
+    $("#filtro-desde-regs").value = ""; $("#filtro-hasta-regs").value = "";
+    recargarRegs();
+    return;
+  }
+  const del = ev.target.closest("[data-eliminar-reg]");
+  if (del) {
+    const p = { dni: del.dataset.eliminarReg, nombre: del.dataset.nombre };
+    const sede = estado.sede, gen = estado.generacion;
+    if (!await confirmar(`${nombreSede(sede)}: ${p.nombre} (DNI ${p.dni}). ${AVISO_ELIMINAR}`,
+        { titulo: "Eliminar del panel", ok: "Eliminar", peligro: true })) return;
+    if (gen !== estado.generacion) return;              // la tarjeta era de la sede anterior
+    del.disabled = true;
+    try { await eliminarRegistrados([p], sede); } catch (e) { avisar(e.message, "mal"); del.disabled = false; }
+    return;
+  }
+  const img = ev.target.closest("[data-foto]");
+  if (img) abrirLightbox(img.src, img.closest(".asis-card")?.querySelector("b")?.textContent || "");
+});
+
+$("#resumen-regs").addEventListener("click", (ev) => {
+  const b = ev.target.closest(".chip-filtro");
+  if (!b) return;
+  if (b.dataset.regsTipo !== undefined) {
+    const sel = $("#filtro-tipo-regs");
+    sel.value = sel.value === b.dataset.regsTipo ? "" : b.dataset.regsTipo;     // tocarlo de nuevo lo saca
+  }
+  if (b.dataset.regsEstado !== undefined) $("#filtro-estado-regs").value = b.dataset.regsEstado;
+  recargarRegs();
+});
+
+$("#buscar-regs").addEventListener("input", () => { clearTimeout(regsTimer); regsTimer = setTimeout(recargarRegs, 250); });
+["#filtro-desde-regs", "#filtro-hasta-regs", "#filtro-tipo-regs", "#filtro-estado-regs", "#filtro-odoo-regs"]
+  .forEach((sel) => $(sel).addEventListener("change", recargarRegs));
+$("#btn-hoy-regs").addEventListener("click", () => { ponerHoyRegs(); recargarRegs(); });
+$("#btn-todas-regs").addEventListener("click", () => {
+  $("#filtro-desde-regs").value = ""; $("#filtro-hasta-regs").value = ""; recargarRegs();
+});
 
 // ---------------------------------------------------------------- historial de accesos (puertas, texto, SIN foto)
 async function cargarHistorial() {

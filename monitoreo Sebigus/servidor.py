@@ -54,6 +54,7 @@ _SECCION_GET = {
     "eventos": ("en_vivo", "asistencias"),
     "asistencias": ("asistencias",),
     "registro": ("registro",),
+    "registrados": ("registro",),
     "duplicados": ("personas",),
     "perfiles": ("personas",),
     "camaras": ("camaras",),
@@ -68,6 +69,7 @@ _SECCION_POST = {
     "reintentar_credenciales": ("personas",),
     "abrir": ("puertas",),
     "asistencias": ("asistencias",),
+    "registrados": ("registro",),
 }
 
 log = logging.getLogger("monitoreo")
@@ -388,6 +390,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(imagen)
         if seccion == "registro":
             return self._registro_get(sede, resto[1:], params)
+        if seccion == "registrados":
+            return self._registrados_get(sede, resto[1:], params)
         if seccion == "duplicados":
             return self._json(nucleo.duplicados(sede))
         if seccion == "perfiles":
@@ -409,6 +413,52 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 log.exception("registro token")
                 return self._error("no se pudo conectar con el panel de personas", 502)
+        return self._error("no encontrado", 404)
+
+    # ---------------- registrados en los fichadores de asistencia ----------
+    # Los datos son del panel de personas: se leen y se borran POR SU API (el
+    # puente de registro.py), no tocando su base desde acá.
+    def _registrados_get(self, sede, resto, params):
+        try:
+            if not resto:
+                filtros = {k: (v or [""])[0] for k, v in params.items()}
+                return self._json(registro.registrados(sede, filtros))
+            if len(resto) == 2 and resto[1] == "foto":
+                imagen = registro.foto(sede, resto[0])
+                if not imagen:
+                    return self._error("sin foto", 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(imagen)))
+                self.send_header("Cache-Control", "max-age=300")
+                self.end_headers()
+                return self.wfile.write(imagen)
+        except registro.RegistroError as e:
+            return self._error(str(e), e.codigo)
+        except Exception:
+            log.exception("registrados GET %s", resto)
+            return self._error("no se pudo consultar el panel de personas", 502)
+        return self._error("no encontrado", 404)
+
+    def _registrados_post(self, sede, resto, datos):
+        # Borrar es irreversible: además de la sección pide supervisor+ (lo exige
+        # _post_sede para todo lo que no está en su lista de excepciones).
+        if resto == ["eliminar"]:
+            dnis = [str(d) for d in (datos.get("dnis") or []) if str(d).strip()]
+            if not dnis:
+                return self._error("no hay a quién eliminar", 400)
+            try:
+                r = registro.eliminar(sede, dnis)
+            except registro.RegistroError as e:
+                return self._error(str(e), e.codigo)
+            except Exception:
+                log.exception("registrados eliminar")
+                return self._error("no se pudo conectar con el panel de personas", 502)
+            usuario = (self._sesion() or {}).get("usuario")
+            log.info("'%s' eliminó del panel de personas (%s): %s | rechazados: %s", usuario, sede,
+                     [x.get("dni") for x in r.get("eliminados", [])],
+                     [x.get("dni") for x in r.get("rechazados", [])])
+            return self._json(r)
         return self._error("no encontrado", 404)
 
     def _archivo(self, ruta, tipo):
@@ -651,6 +701,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if seccion == "asistencias" and len(resto) >= 2 and resto[1] == "sincronizar":
             return self._json({"nuevas": asistencia.sincronizar_sede(sede)})
+
+        if seccion == "registrados":
+            return self._registrados_post(sede, resto[1:], datos)
 
         if seccion == "personas" and len(resto) == 1:
             return self._guardar_persona(sede, None, datos)

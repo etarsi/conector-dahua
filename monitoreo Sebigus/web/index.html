@@ -63,6 +63,10 @@
         <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6"/></svg>
         Registrar asistencia
       </button>
+      <button class="nav-item" data-vista="registrados" data-seccion="registro">
+        <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Registrados
+      </button>
       <button class="nav-item" data-vista="camaras" data-seccion="camaras">
         <svg viewBox="0 0 24 24"><path d="M23 7l-7 5 7 5V7zM14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/></svg>
         Cámaras
@@ -267,6 +271,47 @@
       </div>
       <div class="lista-asistencias" id="lista-asistencias"></div>
       <div class="paginador" id="pag-asis"></div>
+    </section>
+
+    <!-- ---------- Registrados (gente cargada en los fichadores de asistencia) ---------- -->
+    <section class="vista" id="vista-registrados">
+      <header class="cabecera">
+        <div>
+          <h2>Registrados</h2>
+          <p class="sub">Personas cargadas para fichar asistencia en esta sede, con la fecha en que se dieron de alta</p>
+        </div>
+        <div class="acciones">
+          <button class="boton peligro accion-supervisor" id="btn-eliminar-bajas" hidden>Eliminar dados de baja</button>
+        </div>
+      </header>
+      <div class="barra-filtros">
+        <input type="search" id="buscar-regs" placeholder="Buscar nombre o DNI…">
+        <button class="boton chico" id="btn-hoy-regs">Hoy</button>
+        <button class="boton chico" id="btn-todas-regs">Todas las fechas</button>
+        <label class="rango-fecha">Desde <input type="date" id="filtro-desde-regs"></label>
+        <label class="rango-fecha">Hasta <input type="date" id="filtro-hasta-regs"></label>
+        <select id="filtro-tipo-regs" title="Fijo o eventual">
+          <option value="">Fijos y eventuales</option>
+          <option value="fijo">Solo fijos</option>
+          <option value="eventual">Solo eventuales</option>
+          <option value="sin">Sin tipo</option>
+        </select>
+        <select id="filtro-estado-regs" title="Activos o dados de baja">
+          <option value="activos">Activos</option>
+          <option value="bajas">Dados de baja</option>
+          <option value="todos">Activos y bajas</option>
+        </select>
+        <select id="filtro-odoo-regs" title="Si ya están en Odoo">
+          <option value="">Con y sin Odoo</option>
+          <option value="si">Ya en Odoo</option>
+          <option value="no">Faltan en Odoo</option>
+        </select>
+        <span class="crecer"></span>
+        <span class="pastilla" id="contador-regs"></span>
+      </div>
+      <div class="resumen-regs" id="resumen-regs"></div>
+      <div class="lista-asistencias" id="lista-regs"></div>
+      <div class="paginador" id="pag-regs"></div>
     </section>
 
     <!-- ---------- Ajustes ---------- -->

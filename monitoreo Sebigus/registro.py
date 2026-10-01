@@ -24,7 +24,7 @@ import ssl
 import threading
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 log = logging.getLogger("monitoreo.registro")
 
@@ -153,3 +153,56 @@ def token_iframe():
     u = urlparse(_CFG["base_url"])
     puerto = u.port or (443 if u.scheme == "https" else 80)
     return {"token": token, "scheme": u.scheme or "https", "port": puerto}
+
+
+def _llamar(metodo, ruta, cuerpo=None, binario=False):
+    """Llamada al panel de personas renovando el login UNA vez si el token vencio
+    (el panel guarda las sesiones en memoria: un reinicio las borra)."""
+    global _TOKEN
+    if not disponible():
+        raise RegistroError("el registro de asistencia no esta configurado en el servidor", 503)
+    if not _asegurar_token():
+        raise RegistroError("no se pudo autenticar con el panel de personas", 502)
+    status, datos, ctype = _bruto(metodo, ruta, cuerpo, binario)
+    if status == 401:
+        with _LOCK:
+            _TOKEN = None
+            if not _login():
+                raise RegistroError("no se pudo autenticar con el panel de personas", 502)
+        status, datos, ctype = _bruto(metodo, ruta, cuerpo, binario)
+    return status, datos, ctype
+
+
+def _o_error(status, datos):
+    if status == 200:
+        return datos
+    raise RegistroError((datos or {}).get("error") or f"error {status}", status)
+
+
+# Filtros que se pasan tal cual al panel de personas
+FILTROS_REGISTRADOS = ("desde", "hasta", "tipo", "estado", "odoo", "q", "limite", "offset",
+                       "solo_eliminables")
+
+
+def registrados(sede, filtros):
+    """Gente cargada en los fichadores de asistencia de esa sede, con filtros
+    (fecha de alta, tipo, estado, Odoo). La sede la fija el server, no el navegador."""
+    params = {k: v for k, v in (filtros or {}).items() if k in FILTROS_REGISTRADOS and v not in (None, "")}
+    params["sede"] = sede
+    status, datos, _ = _llamar("GET", "/api/registrados?" + urlencode(params))
+    return _o_error(status, datos)
+
+
+def foto(sede, dni):
+    """La foto de rostro guardada en el panel, o None."""
+    status, crudo, _ = _llamar("GET", f"/api/foto/{quote(sede, safe='')}/{quote(str(dni), safe='')}",
+                               binario=True)
+    return crudo if status == 200 else None
+
+
+def eliminar(sede, dnis):
+    """Borra del panel a personas DADAS DE BAJA. El panel de personas decide: solo
+    borra a quien ya salio de todos los fichadores (si no, quedaria cargado en un
+    lector sin que el panel lo pueda sacar)."""
+    status, datos, _ = _llamar("POST", "/api/eliminar", {"sede": sede, "dnis": [str(d) for d in dnis]})
+    return _o_error(status, datos)

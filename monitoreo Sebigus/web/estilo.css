@@ -545,6 +545,34 @@ body:not(.sec-personas) .accion-personas { display: none !important; }
 .asis-meta { font-size: 11.5px; color: var(--apagado); font-family: var(--mono); }
 .asis-resultado { flex: none; }
 
+/* ---------------- Registrados (fichadores de asistencia) ---------------- */
+.reg-card { align-items: flex-start; }
+.reg-card.no { opacity: .8; }
+.reg-chips { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 45%; }
+.reg-chips .etiqueta { white-space: nowrap; }
+.etiqueta.tipo-fijo { color: var(--acento); border-color: rgba(47,129,247,.4); background: rgba(47,129,247,.12); }
+.etiqueta.tipo-eventual { color: #a371f7; border-color: rgba(163,113,247,.4); background: rgba(163,113,247,.12); }
+.reg-motivo { font-size: 11.5px; color: var(--alerta); margin-top: 3px; }
+.reg-eliminar { align-self: flex-start; margin-top: 5px; }
+.resumen-regs { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: -4px 0 14px; }
+.resumen-regs:empty { display: none; }
+.resumen-regs .sep { width: 1px; height: 18px; background: var(--borde-2); margin: 0 3px; }
+.chip-filtro {
+  font: inherit; font-size: 12.5px; padding: 4px 11px; border-radius: 20px; cursor: pointer;
+  background: var(--fondo-2); color: var(--tenue); border: 1px solid var(--borde-2);
+}
+.chip-filtro b { color: var(--texto); font-weight: 600; margin-left: 3px; }
+.chip-filtro:hover { border-color: var(--acento); }
+.chip-filtro.activo { color: var(--acento); border-color: var(--acento); background: rgba(47,129,247,.12); }
+.vacio .boton { margin-left: 8px; }
+/* En el celular las etiquetas van en una fila abajo, no en una columna que no entra */
+@media (max-width: 560px) {
+  .reg-card { flex-wrap: wrap; }
+  .reg-chips { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; max-width: none;
+               width: 100%; padding-left: 66px; }
+  .reg-chips:empty { display: none; }
+}
+
 /* Lightbox de la foto de la fichada */
 .lightbox {
   position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
