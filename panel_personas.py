@@ -339,7 +339,10 @@ def siguiente_id_de_sede(sede):
     with DB_LOCK:
         conn = conectar_db()
         try:
-            filas = conn.execute("SELECT dni FROM personas WHERE sede = ?", (sede,)).fetchall()
+            # Las eliminadas cuentan: su ID ya se uso y puede seguir en marcas viejas
+            filas = conn.execute("SELECT dni FROM personas WHERE sede = ? UNION "
+                                 "SELECT dni FROM personas_eliminadas WHERE sede = ?",
+                                 (sede, sede)).fetchall()
         finally:
             conn.close()
     numeros = [int(f["dni"]) for f in filas if str(f["dni"]).isdigit()]
@@ -516,6 +519,38 @@ def init_db():
                 cr.execute("UPDATE personas SET sede = ? WHERE sede IS NULL", (SEDE_POR_DEFECTO,))
             if "odoo_id" not in columnas:
                 cr.execute("ALTER TABLE personas ADD COLUMN odoo_id INTEGER")
+            # Estado del alta en Odoo: ok | error | baja | sin_dni | conflicto
+            # (NULL = nunca se intento)
+            # odoo_reactivar = 1: reingreso que quedo sin reactivar porque Odoo no contesto
+            # odoo_campos: datos que el panel tenia que escribir en Odoo y no llego
+            # (tipo,turno,nombre): el reintento los escribe como lo hubiera hecho el alta
+            for col, tipo_col in (("odoo_estado", "TEXT"), ("odoo_error", "TEXT"),
+                                  ("odoo_intentos", "INTEGER DEFAULT 0"), ("odoo_actualizado", "TEXT"),
+                                  ("odoo_reactivar", "INTEGER DEFAULT 0"), ("odoo_campos", "TEXT")):
+                if col not in columnas:
+                    cr.execute(f"ALTER TABLE personas ADD COLUMN {col} {tipo_col}")
+            # Cuando se la dio de alta o volvio a entrar (hora local). La usa la vista
+            # de "Registrados" del monitoreo para ver los nuevos del dia. 'creado' no
+            # sirve sola: esta en UTC y no cambia en un reingreso. Las bases viejas
+            # arrancan con la fecha de creado.
+            if "fecha_alta" not in columnas:
+                cr.execute("ALTER TABLE personas ADD COLUMN fecha_alta TEXT")
+                cr.execute("UPDATE personas SET fecha_alta = datetime(creado, 'localtime') "
+                           "WHERE fecha_alta IS NULL AND creado IS NOT NULL")
+            # Personas borradas del panel (dadas de baja y ya fuera de los lectores).
+            # Queda quien fue y, sobre todo, que ese ID ya se uso: no se reasigna
+            # (ver siguiente_id_de_sede).
+            cr.execute("""
+                CREATE TABLE IF NOT EXISTS personas_eliminadas (
+                    sede TEXT NOT NULL,
+                    dni TEXT NOT NULL,
+                    nombre TEXT,
+                    tipo TEXT,
+                    odoo_id INTEGER,
+                    fecha_alta TEXT,
+                    eliminado TEXT
+                )
+            """)
             for col, tipo_col in (("huella", "BLOB"), ("huella_cantidad", "INTEGER"),
                                   ("huella_packet_len", "INTEGER"), ("huella_duress", "INTEGER"),
                                   ("huella_hash", "TEXT"), ("huella_actualizada", "TEXT")):
@@ -537,7 +572,8 @@ def persona_por_dni(dni, sede):
         conn = conectar_db()
         try:
             f = conn.execute(
-                "SELECT dni, nombre, tipo, activo FROM personas WHERE sede = ? AND dni = ?",
+                "SELECT dni, nombre, tipo, turno, activo, odoo_id, odoo_estado, odoo_campos, "
+                "odoo_reactivar FROM personas WHERE sede = ? AND dni = ?",
                 (sede, dni)).fetchone()
             return dict(f) if f else None
         finally:
@@ -545,7 +581,7 @@ def persona_por_dni(dni, sede):
 
 
 def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes,
-                    observaciones="", forzar_foto=False):
+                    observaciones="", forzar_foto=False, heredar_de=None):
     """
     Crea o actualiza la persona.
 
@@ -553,6 +589,11 @@ def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes,
     (que tienen que quedar identicos) y 'eventual' va solo al suyo. Si a alguien
     le cambias el tipo, se lo da de alta en los lectores nuevos y de baja en los
     del tipo anterior, en una sola operacion.
+
+    heredar_de: al corregirle el DNI a alguien, la fila nueva se lleva la foto y
+    las huellas de la del DNI anterior (si no, quedaba cargada sin cara ni huella
+    y la persona seguia fichando con el usuario viejo). Va en la misma operacion,
+    asi el worker nunca ve la fila nueva sin ellas.
     """
     foto_hash = hashlib.sha1(foto_bytes).hexdigest() if foto_bytes else None
     lectores = lectores_para(sede, tipo)
@@ -563,15 +604,25 @@ def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes,
             cr = conn.cursor()
             previa = cr.execute("SELECT foto, foto_hash FROM personas WHERE sede = ? AND dni = ?",
                                 (sede, dni)).fetchone()
-            if previa and foto_bytes is None:
-                foto_bytes, foto_hash = previa["foto"], previa["foto_hash"]
+            origen = None
+            if previa is None and heredar_de and heredar_de != dni:
+                origen = cr.execute("SELECT foto, foto_hash FROM personas WHERE sede = ? AND dni = ?",
+                                    (sede, heredar_de)).fetchone()
+            if foto_bytes is None and (previa or origen):
+                foto_bytes, foto_hash = (previa or origen)["foto"], (previa or origen)["foto_hash"]
 
             cr.execute("""
                 INSERT INTO personas (dni, nombre, vigencia_desde, vigencia_hasta, foto,
                                       foto_hash, activo, sede, tipo, turno, lectores,
-                                      observaciones, actualizado)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                                      observaciones, actualizado, fecha_alta)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sede, dni) DO UPDATE SET
+                    -- Un reingreso cuenta como alta nueva; editar a alguien
+                    -- activo no le cambia la fecha (se evalua con la fila vieja)
+                    fecha_alta = CASE WHEN personas.activo = 0 THEN excluded.fecha_alta
+                                      ELSE COALESCE(personas.fecha_alta,
+                                                    datetime(personas.creado, 'localtime'),
+                                                    excluded.fecha_alta) END,
                     nombre = excluded.nombre,
                     vigencia_desde = excluded.vigencia_desde,
                     vigencia_hasta = excluded.vigencia_hasta,
@@ -585,14 +636,23 @@ def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes,
                     observaciones = excluded.observaciones,
                     actualizado = excluded.actualizado
             """, (dni, nombre, desde, hasta, foto_bytes, foto_hash,
-                  sede, tipo, turno, json.dumps(lectores), observaciones, ahora_txt()))
+                  sede, tipo, turno, json.dumps(lectores), observaciones, ahora_txt(), ahora_txt()))
+            if origen:
+                cr.execute("""
+                    UPDATE personas SET (huella, huella_cantidad, huella_packet_len, huella_duress,
+                                         huella_hash, huella_actualizada) =
+                        (SELECT huella, huella_cantidad, huella_packet_len, huella_duress,
+                                huella_hash, huella_actualizada
+                         FROM personas WHERE sede = ? AND dni = ?)
+                    WHERE sede = ? AND dni = ? AND huella IS NULL
+                """, (sede, heredar_de, sede, dni))
 
             for ip in (lectores + [i for i in ips_de_sede_persona(sede) if i not in lectores]):
                 actual = cr.execute(
-                    "SELECT estado FROM sincronizacion WHERE sede = ? AND dni = ? AND equipo = ?",
+                    "SELECT accion, estado FROM sincronizacion WHERE sede = ? AND dni = ? AND equipo = ?",
                     (sede, dni, ip)
                 ).fetchone()
-                estaba = actual and actual["estado"] == ESTADO_OK
+                estaba = _puede_estar(actual)
 
                 if ip in lectores:
                     accion, estado = ACCION_ALTA, ESTADO_PENDIENTE
@@ -605,6 +665,12 @@ def guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto_bytes,
                     INSERT INTO sincronizacion (sede, dni, equipo, accion, estado, intentos, actualizado)
                     VALUES (?, ?, ?, ?, ?, 0, ?)
                     ON CONFLICT(sede, dni, equipo) DO UPDATE SET
+                        -- Si venia de una baja (hecha, en cola o en vuelo) el lector ya no
+                        -- tiene su cara ni su huella: que el alta las vuelva a subir
+                        foto_hash = CASE WHEN sincronizacion.accion = 'baja' THEN NULL
+                                         ELSE sincronizacion.foto_hash END,
+                        huella_hash = CASE WHEN sincronizacion.accion = 'baja' THEN NULL
+                                           ELSE sincronizacion.huella_hash END,
                         accion = ?, estado = ?, intentos = 0, ultimo_error = NULL, actualizado = ?
                 """, (sede, dni, ip, accion, estado, ahora_txt(), accion, estado, ahora_txt()))
 
@@ -631,14 +697,15 @@ def marcar_baja(dni, sede):
             cr = conn.cursor()
             cr.execute("UPDATE personas SET activo = 0, lectores = '[]', actualizado = ? "
                        "WHERE sede = ? AND dni = ?", (ahora_txt(), sede, dni))
-            # Solo se pide la baja donde la persona realmente esta cargada,
+            # Se pide la baja donde la persona puede estar cargada (no solo donde
+            # quedo ok: un alta con error o pendiente tambien puede haberla creado),
             # y en los lectores de SU sede (no siempre son los del Deposito)
             for ip in ips_de_sede_persona(sede):
                 actual = cr.execute(
-                    "SELECT estado FROM sincronizacion WHERE sede = ? AND dni = ? AND equipo = ?",
+                    "SELECT accion, estado FROM sincronizacion WHERE sede = ? AND dni = ? AND equipo = ?",
                     (sede, dni, ip)
                 ).fetchone()
-                if not actual or actual["estado"] != ESTADO_OK:
+                if not _puede_estar(actual):
                     continue
                 cr.execute("""
                     UPDATE sincronizacion
@@ -659,7 +726,9 @@ def listar_personas(busqueda="", sede=None):
                 SELECT p.dni, p.nombre, p.vigencia_desde, p.vigencia_hasta, p.activo,
                        p.foto_hash IS NOT NULL AS tiene_foto, p.foto_hash,
                        p.actualizado, p.observaciones,
-                       p.sede, p.tipo, p.turno, p.odoo_id, p.lectores, p.huella_cantidad, p.huella_actualizada
+                       p.sede, p.tipo, p.turno, p.odoo_id, p.odoo_estado, p.odoo_error,
+                       p.odoo_campos, p.odoo_reactivar,
+                       p.lectores, p.huella_cantidad, p.huella_actualizada
                 FROM personas p
             """
             args, condiciones = [], []
@@ -700,6 +769,13 @@ def listar_personas(busqueda="", sede=None):
             conn.close()
 
 
+def foto_puesta_en_lectores(dni, sede):
+    """El panel tiene la foto de la persona y esta confirmada en todos sus lectores
+    (la misma cuenta que foto_en_lector del listado)."""
+    p = next((x for x in listar_personas(dni, sede) if x["dni"] == dni), None)
+    return bool(p and p["foto_en_lector"])
+
+
 def obtener_foto(dni, sede):
     with DB_LOCK:
         conn = conectar_db()
@@ -709,6 +785,225 @@ def obtener_foto(dni, sede):
             return row["foto"] if row else None
         finally:
             conn.close()
+
+
+# =========================
+# REGISTRADOS (vista del monitoreo)
+# =========================
+_FECHA_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Cuando se dio de alta (o volvio a entrar). Las importadas de un lector no
+# tienen fecha_alta: usan la de cuando se importaron.
+_SQL_ALTA = "COALESCE(p.fecha_alta, datetime(p.creado, 'localtime'))"
+
+
+def _motivo_no_eliminable(filas_sync, sede):
+    """Por que una persona dada de baja todavia no se puede borrar del panel, o
+    None si ya no esta en ningun lector. Mientras siga en un equipo hay que
+    conservarla: el panel es el unico que sabe que hay que sacarla de ahi.
+    Solo cuentan los lectores que el panel maneja hoy para esa sede (los que
+    marcar_baja puede vaciar): una fila de un equipo viejo que ya no esta en la
+    configuracion, o de otra sede, la trabaria para siempre."""
+    sacando = fallo = cargada = a_medias = 0
+    propios = set(ips_de_sede_persona(sede))
+    for s in filas_sync:
+        if s["equipo"] not in propios:
+            continue
+        baja = s["accion"] == ACCION_BAJA
+        if s["estado"] == ESTADO_AUSENTE or (baja and s["estado"] == ESTADO_OK):
+            continue
+        if baja and s["estado"] == ESTADO_PENDIENTE:
+            sacando += 1
+        elif baja:
+            fallo += 1
+        elif s["estado"] == ESTADO_OK:
+            cargada += 1
+        else:
+            a_medias += 1          # alta pendiente o con error: no se sabe si quedo
+    if fallo:
+        return f"no se la pudo sacar de {fallo} lector(es): reintentá la sincronización"
+    if sacando:
+        return f"todavía se la está sacando de {sacando} lector(es)"
+    if cargada:
+        return f"sigue cargada en {cargada} lector(es)"
+    if a_medias:
+        return f"tiene un alta sin terminar en {a_medias} lector(es)"
+    return None
+
+
+def listar_registrados(sede, filtros=None):
+    """La gente cargada para fichar en una sede, para la vista de "Registrados"
+    del monitoreo: con su fecha de alta y filtros (entre fechas, fijo o
+    eventual, activos o de baja, en Odoo o no, texto), paginada.
+
+    conteo trae los totales para los chips: fijos/eventuales sin el filtro de
+    tipo, activos/bajas sin el de estado, y cuantas bajas de la sede ya se
+    pueden eliminar (sin ningun filtro: es lo que borra el boton general).
+    """
+    f = filtros or {}
+
+    def texto(k):
+        return str(f.get(k) or "").strip()
+
+    sql = f"""
+        SELECT p.dni, p.nombre, p.sede, p.tipo, p.turno, p.activo, p.observaciones,
+               p.foto_hash IS NOT NULL AS tiene_foto, p.huella_cantidad, p.lectores,
+               p.odoo_id, p.odoo_estado, p.odoo_error, p.odoo_campos, p.odoo_reactivar,
+               p.actualizado, {_SQL_ALTA} AS fecha_alta
+        FROM personas p
+        WHERE COALESCE(p.sede, ?) = ?
+    """
+    args = [SEDE_POR_DEFECTO, sede]
+    for clave, operador, hora in (("desde", ">=", "00:00:00"), ("hasta", "<=", "23:59:59")):
+        valor = texto(clave)
+        if not valor:
+            continue
+        if not _FECHA_RE.match(valor):
+            raise ValueError(f"La fecha '{clave}' tiene que ser AAAA-MM-DD")
+        sql += f" AND {_SQL_ALTA} {operador} ?"
+        args.append(f"{valor} {hora}")
+    q = texto("q")
+    if q:
+        sql += " AND (p.dni LIKE ? OR p.nombre LIKE ?)"
+        args += [f"%{q}%", f"%{q}%"]
+    odoo = texto("odoo")
+    if odoo == "si":
+        sql += " AND p.odoo_id IS NOT NULL"
+    elif odoo == "no":
+        sql += " AND p.odoo_id IS NULL"
+    sql += f" ORDER BY {_SQL_ALTA} DESC, p.nombre"
+
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            filas = [dict(r) for r in conn.execute(sql, args)]
+            bajas_sede = [r["dni"] for r in conn.execute(
+                "SELECT dni FROM personas WHERE COALESCE(sede, ?) = ? AND activo = 0",
+                (SEDE_POR_DEFECTO, sede))]
+            sync = {}
+            for r in conn.execute("SELECT dni, equipo, accion, estado FROM sincronizacion "
+                                  "WHERE sede = ?", (sede,)):
+                sync.setdefault(r["dni"], []).append(dict(r))
+        finally:
+            conn.close()
+
+    for p in filas:
+        filas_sync = sync.get(p["dni"], [])
+        try:
+            lectores = json.loads(p.pop("lectores") or "[]")
+        except Exception:
+            lectores = []
+        p["activo"] = bool(p["activo"])
+        p["tiene_foto"] = bool(p["tiene_foto"])
+        obs = (p.get("observaciones") or "").strip()
+        p["importado"] = obs.lower().startswith("importado") or obs.upper().startswith("REVISAR")
+        p["sync"] = {
+            "lectores": len(lectores),
+            "ok": sum(1 for s in filas_sync if s["equipo"] in lectores
+                      and s["accion"] == ACCION_ALTA and s["estado"] == ESTADO_OK),
+            "pendiente": sum(1 for s in filas_sync if s["estado"] == ESTADO_PENDIENTE),
+            "error": sum(1 for s in filas_sync if s["estado"] == ESTADO_ERROR),
+        }
+        motivo = None if p["activo"] else _motivo_no_eliminable(filas_sync, sede)
+        p["se_puede_eliminar"] = not p["activo"] and motivo is None
+        p["motivo"] = motivo or ""
+
+    tipo, estado = texto("tipo"), texto("estado") or "activos"
+
+    def pasa_tipo(p):
+        if tipo in ("fijo", "eventual"):
+            return (p["tipo"] or "") == tipo
+        if tipo == "sin":
+            return not p["tipo"]
+        return True
+
+    def pasa_estado(p):
+        if estado == "bajas":
+            return not p["activo"]
+        if estado == "todos":
+            return True
+        return p["activo"]
+
+    por_tipo = [p for p in filas if pasa_estado(p)]        # para contar fijos / eventuales
+    por_estado = [p for p in filas if pasa_tipo(p)]        # para contar activos / bajas
+    elegidas = [p for p in por_tipo if pasa_tipo(p)]
+    if texto("solo_eliminables") in ("1", "true", "si"):
+        elegidas = [p for p in elegidas if p["se_puede_eliminar"]]
+
+    def numero(k, defecto, tope):
+        try:
+            return max(0, min(int(texto(k) or defecto), tope))
+        except ValueError:
+            return defecto
+    limite = numero("limite", 50, 500) or 50
+    offset = numero("offset", 0, 10 ** 6)
+
+    conteo = {
+        "total": len(elegidas),
+        "fijos": sum(1 for p in por_tipo if p["tipo"] == "fijo"),
+        "eventuales": sum(1 for p in por_tipo if p["tipo"] == "eventual"),
+        "sin_tipo": sum(1 for p in por_tipo if not p["tipo"]),
+        "activos": sum(1 for p in por_estado if p["activo"]),
+        "bajas": sum(1 for p in por_estado if not p["activo"]),
+        "bajas_eliminables": sum(1 for dni in bajas_sede
+                                 if _motivo_no_eliminable(sync.get(dni, []), sede) is None),
+    }
+    return {"personas": elegidas[offset:offset + limite], "conteo": conteo,
+            "sede_odoo": sede_odoo(sede), "tipos": bool(capacidades(sede).get("tipos"))}
+
+
+def eliminar_personas(sede, dnis):
+    """Borra del panel a personas DADAS DE BAJA que ya no estan en ningun lector.
+
+    Una activa, o una que todavia esta en un equipo (la baja no termino o fallo),
+    no se toca: si se borrara, quedaria cargada en ese lector sin que el panel
+    pueda sacarla nunca. Se lleva su foto y su huella guardadas; si vuelve a
+    entrar se la carga de nuevo. Queda un renglon en personas_eliminadas.
+    Odoo no se toca.
+    """
+    eliminados, rechazados, vistos = [], [], set()
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            cr = conn.cursor()
+            for dni in dnis:
+                dni = str(dni or "").strip()
+                if not dni or dni in vistos:
+                    continue
+                vistos.add(dni)
+                p = cr.execute(
+                    f"SELECT p.nombre, p.tipo, p.activo, p.odoo_id, {_SQL_ALTA} AS fecha_alta "
+                    "FROM personas p WHERE COALESCE(p.sede, ?) = ? AND p.dni = ?",
+                    (SEDE_POR_DEFECTO, sede, dni)).fetchone()
+                if not p:
+                    rechazados.append({"dni": dni, "motivo": "ya no está en el panel"})
+                    continue
+                if p["activo"]:
+                    rechazados.append({"dni": dni, "nombre": p["nombre"],
+                                       "motivo": "está activa: primero hay que darla de baja"})
+                    continue
+                filas_sync = [dict(r) for r in cr.execute(
+                    "SELECT equipo, accion, estado FROM sincronizacion WHERE sede = ? AND dni = ?",
+                    (sede, dni))]
+                motivo = _motivo_no_eliminable(filas_sync, sede)
+                if motivo:
+                    rechazados.append({"dni": dni, "nombre": p["nombre"], "motivo": motivo})
+                    continue
+                cr.execute("""
+                    INSERT INTO personas_eliminadas (sede, dni, nombre, tipo, odoo_id,
+                                                     fecha_alta, eliminado)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (sede, dni, p["nombre"], p["tipo"], p["odoo_id"], p["fecha_alta"], ahora_txt()))
+                cr.execute("DELETE FROM sincronizacion WHERE sede = ? AND dni = ?", (sede, dni))
+                cr.execute("DELETE FROM personas WHERE COALESCE(sede, ?) = ? AND dni = ? AND activo = 0",
+                           (SEDE_POR_DEFECTO, sede, dni))
+                eliminados.append({"dni": dni, "nombre": p["nombre"]})
+            conn.commit()
+        finally:
+            conn.close()
+    if eliminados:
+        logging.info(f"Eliminadas del panel ({sede}, dadas de baja): "
+                     + ", ".join(f"{e['dni']} {e['nombre']}" for e in eliminados))
+    return {"eliminados": eliminados, "rechazados": rechazados}
 
 
 def tareas_pendientes(equipo=None, limite=25):
@@ -735,7 +1030,19 @@ def tareas_pendientes(equipo=None, limite=25):
             conn.close()
 
 
-def actualizar_sync(dni, sede, equipo, estado, error=None, foto_hash=None, huella_hash=None):
+def _puede_estar(fila):
+    """La persona puede estar cargada en ese equipo: todo menos 'ausente' (nunca
+    estuvo) y 'baja ok' (ya se la saco). Un alta con error puede haberla creado
+    igual (p. ej. foto rechazada) y una pendiente puede terminar de cargarla."""
+    if not fila or fila["estado"] == ESTADO_AUSENTE:
+        return False
+    return not (fila["accion"] == ACCION_BAJA and fila["estado"] == ESTADO_OK)
+
+
+def actualizar_sync(dni, sede, equipo, estado, error=None, foto_hash=None, huella_hash=None,
+                    accion=None):
+    """Con `accion`, solo si la fila sigue pidiendo eso: si mientras el worker daba
+    un alta alguien pidio la baja, el resultado del alta no pisa la baja."""
     with DB_LOCK:
         conn = conectar_db()
         try:
@@ -744,14 +1051,14 @@ def actualizar_sync(dni, sede, equipo, estado, error=None, foto_hash=None, huell
                     UPDATE sincronizacion
                     SET estado = ?, ultimo_error = NULL, foto_hash = ?, huella_hash = ?,
                         actualizado = ?
-                    WHERE sede = ? AND dni = ? AND equipo = ?
-                """, (estado, foto_hash, huella_hash, ahora_txt(), sede, dni, equipo))
+                    WHERE sede = ? AND dni = ? AND equipo = ? AND (? IS NULL OR accion = ?)
+                """, (estado, foto_hash, huella_hash, ahora_txt(), sede, dni, equipo, accion, accion))
             else:
                 conn.execute("""
                     UPDATE sincronizacion
                     SET estado = ?, intentos = intentos + 1, ultimo_error = ?, actualizado = ?
-                    WHERE sede = ? AND dni = ? AND equipo = ?
-                """, (estado, (error or "")[:300], ahora_txt(), sede, dni, equipo))
+                    WHERE sede = ? AND dni = ? AND equipo = ? AND (? IS NULL OR accion = ?)
+                """, (estado, (error or "")[:300], ahora_txt(), sede, dni, equipo, accion, accion))
             conn.commit()
         finally:
             conn.close()
@@ -1188,6 +1495,41 @@ def aplicar_tarea(t):
 
 TURNOS = {"day": "Turno Dia", "night": "Turno Noche"}
 
+# Un DNI argentino real tiene 7 u 8 digitos. Los importados de los lectores a
+# veces traen el ID corto del equipo ("78"): con eso NO se crea a nadie en Odoo
+# (seria un empleado con un DNI falso), solo se lo vincula si ya existe.
+def es_dni_real(dni):
+    return str(dni or "").isdigit() and 7 <= len(str(dni)) <= 8
+
+
+def campo_lector_de(sede):
+    """En que campo de Odoo va el ID del lector de esa sede (igual que el webhook)."""
+    return "id_lavalle" if str(sede or "").lower().startswith("lav") else "id_deposito"
+
+
+class _TransporteConTimeout(xmlrpc.client.Transport):
+    """ServerProxy no acepta timeout: sin esto, un Odoo colgado deja trabado el
+    alta (y el _lock, y con el todo envio a Odoo) para siempre."""
+    def __init__(self, timeout):
+        super().__init__()
+        self._timeout = timeout
+
+    def make_connection(self, host):
+        conn = super().make_connection(host)
+        conn.timeout = self._timeout
+        return conn
+
+
+class _TransporteSeguroConTimeout(xmlrpc.client.SafeTransport):
+    def __init__(self, timeout):
+        super().__init__()
+        self._timeout = timeout
+
+    def make_connection(self, host):
+        conn = super().make_connection(host)
+        conn.timeout = self._timeout
+        return conn
+
 
 class EmpleadosOdoo:
     def __init__(self, cfg, cfg_emp):
@@ -1204,74 +1546,687 @@ class EmpleadosOdoo:
         self._models = None
         self._lock = threading.Lock()
 
+    def _transporte(self, url):
+        if url.startswith("https"):
+            return _TransporteSeguroConTimeout(self.timeout)
+        return _TransporteConTimeout(self.timeout)
+
     def _conectar(self):
-        common = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common", allow_none=True)
+        common = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common", allow_none=True,
+                                           transport=self._transporte(self.url))
         uid = common.authenticate(self.db, self.usuario, self.clave, {})
         if not uid:
             raise PermissionError("Odoo rechazo el usuario o la api key")
         self._uid = uid
-        self._models = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object", allow_none=True)
+        self._models = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object", allow_none=True,
+                                                 transport=self._transporte(self.url))
 
     def _eje(self, modelo, metodo, args, kw=None):
         if self._models is None:
             self._conectar()
         return self._models.execute_kw(self.db, self._uid, self.clave, modelo, metodo, args, kw or {})
 
-    def guardar_empleado(self, dni, nombre, tipo, turno):
-        """Crea el empleado en Odoo, o lo actualiza si ya existe ese DNI."""
-        if not self.enabled:
-            return True, None, "alta en Odoo desactivada"
+    # ---- como encuentra a la persona en Odoo ----
+    # En hr_enhancement la baja es state='inactive' (NO archiva). Al pasar a baja
+    # Odoo le BORRA el dni y los IDs de lector (son unicos: los libera) y lo anota
+    # en el chatter: "Baja: se liberaron los identificadores. DNI: <dni> | ...".
+    # Por eso a un dado de baja no se lo encuentra por dni: se lo busca por esa
+    # nota y por el CUIL (que la baja no borra). Archivado (active=False) es el
+    # "Archivar" del nucleo, hecho a mano. Las marcas buscan primero por el ID del
+    # lector (id_deposito / id_lavalle) y despues por dni: aca se busca igual.
+    _CAMPOS = ["name", "dni", "cuil", "active", "state", "employee_type", "type_shift",
+               "id_deposito", "id_lavalle"]
 
+    @staticmethod
+    def _vivo(ficha):
+        return bool(ficha.get("active")) and ficha.get("state") != "inactive"
+
+    @staticmethod
+    def _mismo_documento(texto, doc):
+        """'30.111.222', '30 111 222', '30-111-222', '030111222' son el mismo DNI.
+        En Odoo el DNI es texto libre y el UNIQUE compara texto: comparar el texto
+        exacto termina en una ficha duplicada."""
+        return bool(doc) and solo_digitos(texto or "").lstrip("0") == str(doc).lstrip("0")
+
+    @staticmethod
+    def _quien(f):
+        return f"{f.get('name')} (#{f['id']})"
+
+    def _fichas(self, dominio, limite=5):
+        return self._eje("hr.employee", "search_read", [dominio],
+                         {"fields": self._CAMPOS, "context": {"active_test": False}, "limit": limite})
+
+    def _por_documento(self, doc):
+        """Fichas con este DNI, escrito como sea. Se trae lo que contiene los ultimos
+        3 digitos (estan en cualquier formato agrupado de a 3) y se compara digito a digito."""
+        return [f for f in self._fichas([("dni", "ilike", doc[-3:])], limite=500)
+                if self._mismo_documento(f.get("dni"), doc)]
+
+    def _bajas_liberadas(self, doc):
+        """Fichas dadas de baja a las que la baja les borro ESTE dni.
+        Devuelve (fichas, aviso); aviso no vacio si no se pudo revisar el chatter."""
+        ids, aviso = set(), ""
+        patron = re.compile(r"DNI:\s*([^|<]+?)\s*\|")
+        try:
+            # "<3 digitos> |" esta en la nota con el DNI escrito de cualquier forma
+            notas = self._eje("mail.message", "search_read",
+                              [[("model", "=", "hr.employee"), ("body", "ilike", f"{doc[-3:]} |")]],
+                              {"fields": ["res_id", "body"], "order": "id desc", "limit": 200})
+            for nota in notas:
+                m = patron.search(nota.get("body") or "")
+                if m and nota.get("res_id") and self._mismo_documento(m.group(1), doc):
+                    ids.add(nota["res_id"])
+        except xmlrpc.client.Fault as exc:
+            aviso = ("no se pudo revisar el historial de bajas de Odoo "
+                     f"({exc.faultString.strip().splitlines()[-1][:120]})")
+            logging.warning(f"Odoo: {aviso} | DNI={doc}")
+        try:
+            # El CUIL lleva el DNI en el medio (20-30111222-3) y la baja no lo borra
+            for f in self._fichas([("cuil", "ilike", doc[-3:])], limite=200):
+                if solo_digitos(f.get("cuil") or "")[2:10] == doc.zfill(8):
+                    ids.add(f["id"])
+        except xmlrpc.client.Fault:
+            pass                         # CUIL sin cargar o sin permiso: es solo un respaldo
+        if not ids:
+            return [], aviso
+        fichas = self._eje("hr.employee", "read", [sorted(ids)],
+                           {"fields": self._CAMPOS, "context": {"active_test": False}})
+        return [f for f in fichas if not self._vivo(f) and not f.get("dni")], aviso
+
+    def _resolver(self, user_id, doc, campo_lector):
+        """Que hacer con esta persona, SIN tocar Odoo.
+        Devuelve (accion, ficha, detalle): vincular | reactivar | crear | conflicto."""
+        # Con un ID que no es DNI ("78"), el 'dni' de Odoo es el codigo del lector (asi
+        # lo carga el alta automatica de las marcas) y el lector REUSA los numeros: ese
+        # numero no identifica a nadie. Solo vale el ID del lector, y nunca para revivir.
+        corto = not es_dni_real(doc)
+        por_id = self._fichas([(campo_lector, "=", user_id)]) if user_id else []
+        por_dni = [] if corto else self._por_documento(doc)
+        for grupo in (por_id, por_dni):
+            if len(grupo) > 1:
+                return "conflicto", None, ("hay más de una ficha en Odoo para la persona: "
+                                           + ", ".join(self._quien(f) for f in grupo))
+        a, b = (por_id or [None])[0], (por_dni or [None])[0]
+        if a and b and a["id"] != b["id"]:
+            return "conflicto", None, (f"el ID {user_id} del lector está en la ficha de {self._quien(a)} "
+                                       f"y el DNI en la de {self._quien(b)}")
+        e = b or a
+        if e:
+            if self._vivo(e):
+                return "vincular", e, ""
+            if corto:
+                return "conflicto", None, (f"el ID {user_id} figura en una ficha de baja ({self._quien(e)}): "
+                                           f"con un ID que no es DNI no se reactiva a nadie (el lector "
+                                           f"reusa los números)")
+            # De baja o archivada pero conserva el dato: se reactiva solo si coincide
+            # el DOCUMENTO, nunca solo por el codigo del lector
+            if b or self._mismo_documento(e.get("dni"), doc):
+                return "reactivar", e, ""
+            return "conflicto", None, (f"el ID {user_id} figura en una ficha de baja con otro DNI "
+                                       f"({self._quien(e)}): no se reactiva a nadie solo por el lector")
+        if corto:
+            return "crear", None, ""     # asegurar_empleado lo frena como sin_dni
+        candidatas, aviso = self._bajas_liberadas(doc)
+        if len(candidatas) > 1:
+            return "conflicto", None, ("hay varias fichas dadas de baja con ese DNI en Odoo: "
+                                       + ", ".join(self._quien(f) for f in candidatas))
+        if candidatas:
+            return "reactivar", candidatas[0], ""
+        return "crear", None, aviso
+
+    @staticmethod
+    def _puede_nombre(ficha):
+        # La misma regla que el formulario de Odoo: el nombre de un fijo ya
+        # confirmado no se toca; el de un borrador o un eventual si.
+        return ficha.get("state") == "draft" or ficha.get("employee_type") == "eventual"
+
+    @staticmethod
+    def _mismo_nombre(en_odoo, en_panel):
+        """'NUNEZ JOSE' (como lo guarda el lector) es 'José Núñez' en Odoo: no se pisa
+        el nombre con tildes por el mismo sin ellas o en otro orden. Al reves si:
+        si el del panel trae tildes que el de Odoo no tiene, es una correccion."""
+        po, pn = (en_odoo or "").split(), (en_panel or "").split()
+        if sorted(a_ascii(x).upper() for x in po) != sorted(a_ascii(x).upper() for x in pn):
+            return False
+        # Palabra por palabra: se escribe si el panel agrega alguna tilde que Odoo
+        # no tiene, y nunca si sacaria una que Odoo si tiene
+        restantes, aporta = list(po), False
+        for w in pn:
+            o = next(x for x in restantes if a_ascii(x).upper() == a_ascii(w).upper())
+            restantes.remove(o)
+            w, o = unicodedata.normalize("NFC", w), unicodedata.normalize("NFC", o)
+            if len(w) != len(o):
+                continue
+            for cw, co in zip(w, o):
+                tw, to = a_ascii(cw) != cw, a_ascii(co) != co
+                if to and not tw:
+                    return True
+                aporta = aporta or (tw and not to)
+        return not aporta
+
+    def asegurar_empleado(self, user_id, nombre, tipo, turno, campo_lector="id_deposito",
+                          reactivar=True, actualizar=(), simular=False, estricto=False):
+        """Deja a la persona en Odoo SIN duplicarla. user_id es el ID del lector (el
+        DNI que carga el panel, con la N de turno noche si la tiene).
+
+        - ya esta activa    -> se vincula y se le graba el ID del lector si no lo tenia
+                               (asi la primera marca la encuentra y no crea otra)
+        - esta dada de baja -> se la REACTIVA: vuelve a 'active', recupera su DNI y se
+                               limpia la fecha de salida. Con reactivar=False solo se
+                               informa: ni el automatico ni una edicion comun vuelven a
+                               poner a nadie en nomina.
+        - no existe         -> se crea en 'active' (igual que el alta de las marcas), solo
+                               con un DNI real
+        - datos cruzados    -> no se toca nada: queda 'conflicto' para que lo vea RRHH
+
+        `actualizar`: que datos del panel se escriben sobre una ficha que ya existe
+        ({'tipo', 'turno', 'nombre'} o True = todos). Solo lo que cambio en el panel:
+        nunca se pisa lo que cargo RRHH en Odoo por una edicion que no lo toco.
+        `estricto`: si no se pudo revisar el historial de bajas, no se crea (podria ser
+        un reingreso: duplicado). El automatico y el masivo van estrictos.
+
+        Devuelve (ok, odoo_id, accion, detalle). accion: vincular | reactivar | crear |
+        baja | sin_dni | conflicto | desactivado | error.
+        """
+        if not self.enabled:
+            return True, None, "desactivado", "alta en Odoo desactivada"
+        user_id = str(user_id or "").strip()
+        # Igual que el webhook de marcas: la N de turno noche no es parte del documento
+        doc = user_id[1:] if user_id[:1] in ("N", "n") else user_id
+        campos = {"tipo", "turno", "nombre"} if actualizar is True else set(actualizar or ())
+        if not es_dni_real(doc):
+            campos = set()      # vinculo por el codigo del lector: no se le escribe nada
         with self._lock:
             try:
-                valores = {
-                    "name": nombre,
-                    "dni": dni,
-                    "employee_type": self.tipo_a_odoo.get(tipo, "employee"),
-                }
-                if turno in TURNOS:
-                    valores["type_shift"] = turno
-                horario = self.horario_por_tipo.get(tipo)
-                if horario:
-                    valores["work_schedule_id"] = int(horario)
-
-                # active_test False a proposito: por defecto Odoo no devuelve los
-                # empleados archivados, y sin esto un reingreso creaba una ficha
-                # nueva con un DNI que ya existia. Hay que encontrarlo aunque
-                # este de baja, justamente para no duplicarlo.
-                existente = self._eje("hr.employee", "search",
-                                      [[("dni", "=", dni)]],
-                                      {"limit": 1, "context": {"active_test": False}})
-                if existente:
-                    ficha = self._eje("hr.employee", "read", [existente],
-                                      {"fields": ["name", "active"],
-                                       "context": {"active_test": False}})
-                    archivado = ficha and not ficha[0].get("active")
-                    self._eje("hr.employee", "write", [existente, valores])
-                    estado = " (estaba archivado)" if archivado else ""
-                    logging.info(f"Odoo: empleado actualizado | DNI={dni} {nombre} "
-                                 f"(id={existente[0]}){estado}")
-                    detalle = "ya existia en Odoo, se actualizo"
-                    if archivado:
-                        detalle += ". La ficha estaba archivada: revisala en Odoo"
-                    return True, existente[0], detalle
-
-                nuevo = self._eje("hr.employee", "create", [valores])
-                logging.info(f"Odoo: empleado creado | DNI={dni} {nombre} (id={nuevo})")
-                return True, nuevo, "creado en Odoo"
-
+                accion, ficha, detalle = self._resolver(user_id, doc, campo_lector)
+                if accion == "conflicto":
+                    return False, None, "conflicto", detalle
+                if accion == "reactivar" and not reactivar:
+                    return (False, ficha["id"], "baja",
+                            f"en Odoo figura dado de baja ({self._quien(ficha)}): "
+                            f"usá 'Enviar a Odoo' para reactivarlo")
+                if accion == "crear":
+                    if not es_dni_real(doc):
+                        # En el panel ese numero ES el ID del lector: no se puede "corregir"
+                        # sin volver a enrolar a la persona. Lo que si se puede es crearla
+                        # en Odoo con su DNI real y el ID en el campo del lector: despues
+                        # este mismo boton la encuentra por ahi y la vincula.
+                        etiqueta = "ID Lector Lavalle" if campo_lector == "id_lavalle" else "ID Lector Depósito"
+                        return (False, None, "sin_dni",
+                                f"'{doc}' es el ID del lector, no un DNI: creala en Odoo con su DNI "
+                                f"real y {user_id} en '{etiqueta}'; después 'Enviar a Odoo' la vincula")
+                    if detalle and (not reactivar or estricto):
+                        # Sin poder mirar las bajas, crear podria duplicar a un reingreso
+                        return False, None, "error", f"{detalle}: no se crea para no duplicar"
+                if simular:
+                    return True, (ficha or {}).get("id"), accion, (ficha or {}).get("name") or nombre
+                ok, oid, acc, det = self._aplicar(accion, ficha, user_id, doc, nombre, tipo, turno,
+                                                  campo_lector, campos)
+                if detalle and acc == "crear":
+                    det += f" (ojo: {detalle})"
+                return ok, oid, acc, det
             except PermissionError as exc:
+                # Clave/usuario rechazados: es un problema de TODOS, no de esta persona.
+                # Se informa como "no se pudo conectar" para que el lote y el automatico
+                # corten (un login fallido por persona activa el freno de Odoo por IP).
                 self._models = None
-                return False, None, str(exc)
+                return False, None, "error", f"no se pudo conectar con Odoo: {exc}"
             except xmlrpc.client.Fault as exc:
                 self._models = None
-                return False, None, f"Odoo rechazo el alta: {exc.faultString.strip().splitlines()[-1][:200]}"
+                return False, None, "error", f"Odoo rechazo el alta: {exc.faultString.strip().splitlines()[-1][:200]}"
             except Exception as exc:
                 self._models = None
-                return False, None, f"no se pudo conectar con Odoo: {exc}"
+                return False, None, "error", f"no se pudo conectar con Odoo: {exc}"
 
+    def _aplicar(self, accion, ficha, user_id, doc, nombre, tipo, turno, campo_lector,
+                 campos, reintento=False):
+        tipo_odoo = self.tipo_a_odoo.get(tipo, "employee")
+        try:
+            if accion in ("vincular", "reactivar"):
+                v = {}
+                if "tipo" in campos and ficha.get("employee_type") != tipo_odoo:
+                    v["employee_type"] = tipo_odoo
+                if "turno" in campos and turno in TURNOS and ficha.get("type_shift") != turno:
+                    v["type_shift"] = turno
+                # Un nombre que es el propio DNI (el lector no tenia nombre) no se escribe
+                if ("nombre" in campos and nombre and nombre != doc and self._puede_nombre(ficha)
+                        and not self._mismo_nombre(ficha.get("name"), nombre)):
+                    v["name"] = nombre
+                # El webhook de marcas busca primero por el ID del lector y despues por
+                # el DNI EXACTO: si la ficha tiene el DNI con otro formato y no tiene el
+                # ID, la primera marca crea otra. Por eso se le graba (si no lo tiene).
+                if user_id and not ficha.get(campo_lector):
+                    v[campo_lector] = user_id
+                if accion == "reactivar":
+                    if not ficha.get("active"):
+                        v["active"] = True
+                    if ficha.get("state") == "inactive":
+                        # Se quita la baja. salida_date se limpia: si no, la proxima baja
+                        # no graba su fecha. La vieja queda en el historial de la ficha.
+                        v.update({"state": "active", "salida_date": False})
+                    if not ficha.get("dni"):
+                        v["dni"] = doc   # en el MISMO write que state: Odoo exige DNI fuera de la baja
+                if v:
+                    self._eje("hr.employee", "write", [[ficha["id"]], v])
+                if accion == "vincular":
+                    logging.info(f"Odoo: vinculado | DNI={doc} {nombre} -> {self._quien(ficha)}"
+                                 + (f" (se escribio {', '.join(v)})" if v else ""))
+                    return True, ficha["id"], "vincular", "ya estaba en Odoo: quedo vinculado"
+                logging.info(f"Odoo: empleado REACTIVADO | DNI={doc} {nombre} -> {self._quien(ficha)} "
+                             f"(estaba {ficha.get('state')}{'' if ficha.get('active') else ', archivado'})")
+                return (True, ficha["id"], "reactivar",
+                        "estaba dado de baja en Odoo: se lo reactivo (revisá la fecha de ingreso)")
+
+            v = {"name": nombre, "dni": doc, "employee_type": tipo_odoo, "state": "active"}
+            # Con el ID del lector, igual que la que crea el webhook: si despues se le
+            # corrige el DNI, las marcas con el usuario de siempre la siguen encontrando
+            if user_id:
+                v[campo_lector] = user_id
+            if turno in TURNOS:
+                v["type_shift"] = turno
+            horario = self.horario_por_tipo.get(tipo)
+            if horario:
+                v["work_schedule_id"] = int(horario)
+            nuevo = self._eje("hr.employee", "create", [v])
+            logging.info(f"Odoo: empleado creado | DNI={doc} {nombre} (id={nuevo})")
+            return True, nuevo, "crear", "creado en Odoo"
+        except xmlrpc.client.Fault as exc:
+            texto = exc.faultString
+            # El ID del lector ya lo tiene otra ficha que este usuario no ve: no se fuerza
+            if "ya está cargado en la ficha" in texto:
+                return False, None, "conflicto", texto.strip().splitlines()[-1][:250]
+            # DNI unico: alguien lo cargo en el medio (casi siempre el alta automatica
+            # de una fichada). Se vuelve a buscar UNA vez y se vincula.
+            if not reintento and ("nico" in texto or "unique" in texto.lower()):
+                otra, ficha2, det2 = self._resolver(user_id, doc, campo_lector)
+                if otra == "vincular":
+                    return self._aplicar("vincular", ficha2, user_id, doc, nombre, tipo, turno,
+                                         campo_lector, campos, True)
+                return False, None, "conflicto", (det2 or "Odoo dice que el DNI ya existe pero no se "
+                                                  "encuentra la ficha (puede no verla el usuario de la API)")
+            raise
 
 ODOO_EMPLEADOS = EmpleadosOdoo(CFG.get("odoo") or {}, PANEL.get("odoo_empleados") or {})
+HAY_TRABAJO_ODOO = threading.Event()
+ENVIO_ODOO_LOCK = threading.Lock()       # un envio masivo a la vez
+
+
+def sede_odoo(clave):
+    """La sede da de alta en Odoo (Deposito si; Lavalle todavia no)."""
+    return bool(sede_de(clave).get("odoo", True)) and ODOO_EMPLEADOS.enabled
+
+
+ESTADOS_ODOO_FALLA = ("baja", "sin_dni", "conflicto")
+
+
+def campos_pendientes(p):
+    """Los datos que quedaron sin escribir en Odoo (odoo_campos), como set."""
+    return {c for c in str((p or {}).get("odoo_campos") or "").split(",") if c}
+
+
+def marcar_odoo(sede, dni, ok, odoo_id, accion, detalle):
+    """Deja anotado en la persona como quedo su alta en Odoo."""
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            if ok and odoo_id:
+                conn.execute("UPDATE personas SET odoo_id = ?, odoo_estado = 'ok', odoo_error = NULL, "
+                             "odoo_intentos = 0, odoo_reactivar = 0, odoo_campos = NULL, "
+                             "odoo_actualizado = ? WHERE sede = ? AND dni = ?",
+                             (odoo_id, ahora_txt(), sede, dni))
+            elif not ok:
+                estado = accion if accion in ESTADOS_ODOO_FALLA else "error"
+                # Si Odoo no contesta (o rechaza la clave) no es culpa de esta persona:
+                # no se le cuenta el intento, asi no termina esperando 6 h por algo ajeno.
+                suma = 0 if str(detalle or "").startswith("no se pudo conectar") else 1
+                # De baja, sin DNI o con datos cruzados ya no esta "en Odoo": se
+                # desvincula, asi se ve el estado real, aparece el boton y vuelve a la
+                # lista de faltantes. Un error (Odoo no contesto) no cambia el vinculo:
+                # si quedo algo por escribir, lo desvincula odoo_pendiente.
+                conn.execute("UPDATE personas SET odoo_estado = ?, odoo_error = ?, "
+                             "odoo_intentos = COALESCE(odoo_intentos, 0) + ?, odoo_actualizado = ?, "
+                             "odoo_id = CASE WHEN ? = 'error' THEN odoo_id ELSE NULL END "
+                             "WHERE sede = ? AND dni = ?",
+                             (estado, (detalle or "")[:300], suma, ahora_txt(), estado, sede, dni))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def revisar_cambio_dni(sede, viejo, nuevo, vieja):
+    """Cambiarle el DNI en el panel a alguien que ya tiene ficha en Odoo deja dos
+    fichas de la misma persona: la de siempre, con el DNI anterior, y la que crea
+    el panel (o la primera marca, por el webhook) con el DNI nuevo. Por eso solo
+    se deja cuando en Odoo ya esta corregido: el DNI nuevo lleva a esa misma ficha.
+
+    `vieja` es la fila del panel con el DNI anterior. Si nunca se vinculo (una
+    importada, o una que fallo) igual puede tener ficha, creada por sus marcas:
+    se le pregunta a Odoo por el ID viejo. Devuelve None si se puede seguir, o
+    (codigo_http, mensaje). Si se sigue, el handler saca el ID anterior de los
+    lectores (la fila nueva hereda su foto y su huella)."""
+    # Tambien en las sedes que no dan de alta en Odoo (Lavalle): sus marcas igual
+    # llegan al webhook, que crea la ficha. Aca solo se lee, no se crea ni vincula.
+    if not ODOO_EMPLEADOS.enabled:
+        return None
+    lector = campo_lector_de(sede)
+    E = ODOO_EMPLEADOS
+
+    def vivas_del_viejo(excluir):
+        """Fichas VIVAS a las que llegan hoy las marcas con el ID viejo. Una archivada
+        o de baja no recibe marcas (el webhook las rechaza): no duplica a nadie."""
+        doc_v = viejo[1:] if viejo[:1] in ("N", "n") else viejo
+        try:
+            with E._lock:
+                fs = E._fichas([(lector, "=", viejo)])
+                if es_dni_real(doc_v):
+                    fs += E._por_documento(doc_v)
+        except Exception as exc:
+            E._models = None
+            return None, (503, f"No se pudo revisar en Odoo si {viejo} ya tiene ficha ({exc}): "
+                               f"probá de nuevo en un rato")
+        return [f for f in fs if E._vivo(f) and f["id"] not in excluir], None
+
+    ficha_vieja = vieja.get("odoo_id")
+    if not ficha_vieja:
+        _, oid, accion, det = E.asegurar_empleado(viejo, vieja.get("nombre") or "", vieja.get("tipo"),
+                                                  vieja.get("turno"), campo_lector=lector,
+                                                  reactivar=False, simular=True)
+        if accion == "error":
+            return 503, f"No se pudo revisar en Odoo si {viejo} ya tiene ficha ({det}): probá de nuevo en un rato"
+        if accion == "conflicto":
+            # Con un ID corto, la ficha que RRHH acaba de ARCHIVAR (como pide el
+            # mensaje) sale como 'conflicto'. Solo traba si queda alguna VIVA.
+            vivas, err = vivas_del_viejo(())
+            if err:
+                return err
+            if vivas:
+                return 409, f"El {viejo} tiene datos cruzados en Odoo ({det}): que RRHH lo revise antes de cambiarlo"
+            return None
+        if not oid:
+            return None              # no tiene ficha: el DNI nuevo se da de alta como siempre
+        ficha_vieja = oid
+    _, oid, accion, det = E.asegurar_empleado(nuevo, "", None, None, campo_lector=lector,
+                                              reactivar=False, simular=True)
+    if accion == "error":
+        return 503, f"No se pudo revisar en Odoo el DNI {nuevo} ({det}): probá de nuevo en un rato"
+
+    def leer(ficha_id):
+        try:
+            with E._lock:
+                return (E._fichas([("id", "=", ficha_id)], limite=1) or [None])[0], None
+        except Exception as exc:
+            E._models = None
+            return None, (503, f"No se pudo revisar en Odoo la ficha #{ficha_id} ({exc}): probá de nuevo en un rato")
+
+    if oid == ficha_vieja:
+        # RRHH ya lo corrigio en Odoo. Pero las marcas buscan el DNI TAL CUAL: con
+        # '30.111.223' la primera marca con el usuario nuevo crearia otra ficha
+        doc = nuevo[1:] if nuevo[:1] in ("N", "n") else nuevo
+        f, err = leer(oid)
+        if err:
+            return err
+        if f and es_dni_real(doc) and str(f.get("dni") or "") != doc and f.get(lector) != nuevo:
+            return 409, (f"En Odoo la ficha #{oid} tiene el DNI escrito '{f.get('dni')}': las marcas lo "
+                         f"buscan tal cual, tiene que quedar {doc} (sin puntos ni espacios). Que RRHH lo "
+                         f"corrija y volvé a intentar.")
+        return None
+    if oid and accion == "vincular":
+        # El DNI nuevo lleva a otra ficha viva: vale si RRHH ya descarto la vieja
+        f, err = leer(ficha_vieja)
+        if err:
+            return err
+        if f and E._vivo(f):
+            return 409, (f"En Odoo el {nuevo} ya es de otra ficha (#{oid}) y esta persona tiene la "
+                         f"#{ficha_vieja}: RRHH tiene que ARCHIVAR la que sobra (si la da de baja, "
+                         f"la próxima marca con el {viejo} crea otra); después volvé a intentar")
+        # La persona sigue fichando con el ID viejo: si la vieja se dio de baja (la baja
+        # borra el DNI y el ID del lector), una marca en el medio le pudo crear OTRA ficha
+        vivas, err = vivas_del_viejo((oid, ficha_vieja))
+        if err:
+            return err
+        if vivas:
+            return 409, (f"El {viejo}, con el que esta persona sigue fichando, tiene otra ficha viva en Odoo "
+                         f"(#{vivas[0]['id']}), seguramente creada por una marca: que RRHH la ARCHIVE y "
+                         f"volvé a intentar")
+        return None
+    if oid:
+        # El DNI nuevo es de una ficha DE BAJA: ni archivar ni dar de baja la otra lo destraba
+        return 409, (f"En Odoo el {nuevo} es de la ficha #{oid}, que está de baja, y esta persona tiene "
+                     f"la #{ficha_vieja}: RRHH tiene que corregir el DNI en la #{ficha_vieja}, o reactivar "
+                     f"la #{oid} y archivar la #{ficha_vieja}; después volvé a intentar")
+    return 409, (f"Esta persona ya tiene ficha en Odoo (#{ficha_vieja}) con el {viejo}. Si se lo "
+                 f"cambiás acá quedan dos fichas de la misma persona: pedile a RRHH que corrija el "
+                 f"DNI en Odoo y después cambialo acá.")
+
+
+def odoo_pendiente(sede, dni, campos, reactivar=False):
+    """Un alta, reingreso o edicion que no llego a Odoo. Queda anotado para que el
+    envio automatico lo termine igual que si hubiera salido en el momento:
+
+    - se suman los datos que habia que escribir (odoo_campos); con eso, aunque
+      siga vinculada, vuelve a la lista de faltantes (personas_sin_odoo);
+    - en un reingreso con Odoo caido, se pide reactivarla y ya (odoo_reactivar):
+      la persona esta en el lector y su primera marca le crearia otra ficha.
+    El vinculo (odoo_id) no se toca: dice quien era en Odoo, y sin eso un cambio
+    de DNI posterior crearia una segunda ficha."""
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            f = conn.execute("SELECT odoo_campos FROM personas WHERE sede = ? AND dni = ?",
+                             (sede, dni)).fetchone()
+            todos = ",".join(sorted(campos_pendientes(f and dict(f)) | set(campos or ()))) or None
+            conn.execute("UPDATE personas SET odoo_campos = ?, "
+                         "odoo_reactivar = CASE WHEN ? THEN 1 ELSE odoo_reactivar END, "
+                         "odoo_intentos = CASE WHEN ? THEN 0 ELSE odoo_intentos END "
+                         "WHERE sede = ? AND dni = ?",
+                         (todos, bool(reactivar), bool(reactivar), sede, dni))
+            conn.commit()
+        finally:
+            conn.close()
+    HAY_TRABAJO_ODOO.set()
+
+
+def personas_sin_odoo(sede=None):
+    """Activas en el panel, de sedes con Odoo, que todavia no quedaron vinculadas
+    o a las que les quedo algo sin terminar en Odoo.
+
+    Un odoo_id vacio NO quiere decir que no esten en Odoo: el alta automatica de
+    las fichadas pudo haberlas creado. Por eso enviar_a_odoo busca antes de crear.
+    """
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            # Tambien las vinculadas a las que les quedo algo por hacer en Odoo: un
+            # reingreso sin reactivar, datos sin escribir o un error en el ultimo envio
+            sql = ("SELECT sede, dni, nombre, tipo, observaciones, lectores, odoo_id, odoo_estado, "
+                   "odoo_error, odoo_intentos, odoo_actualizado, odoo_reactivar, odoo_campos "
+                   "FROM personas WHERE activo = 1 AND (odoo_id IS NULL OR odoo_estado = 'error' "
+                   "OR odoo_campos IS NOT NULL OR odoo_reactivar = 1)")
+            args = []
+            if sede:
+                sql += " AND sede = ?"
+                args.append(sede)
+            filas = [dict(r) for r in conn.execute(sql + " ORDER BY nombre", args)]
+        finally:
+            conn.close()
+    return [f for f in filas if sede_odoo(f["sede"] or SEDE_POR_DEFECTO)]
+
+
+def es_dudosa(p):
+    """Importados de los lectores de los que no se sabe bien quienes son: sin tipo
+    (donde la sede usa tipos), marcados 'REVISAR', o encontrados en lectores de otra
+    sede (la importacion recorre todos los lectores y guarda todo en el Deposito).
+    No se mandan solos a Odoo: se revisan y se mandan de a uno con el boton."""
+    sede = p.get("sede") or SEDE_POR_DEFECTO
+    if capacidades(sede).get("tipos", True) and not p.get("tipo"):
+        return True
+    if str(p.get("observaciones") or "").upper().startswith("REVISAR"):
+        return True
+    try:
+        lectores = set(json.loads(p.get("lectores") or "[]"))
+    except Exception:
+        lectores = set()
+    propias = set(ips_de_sede_persona(sede))
+    if lectores - propias:
+        return True
+    # La importacion pierde la IP ajena en 'lectores' cuando puede deducir el tipo,
+    # pero deja un 'ok' en sincronizacion por cada lector donde la encontro. Con un
+    # ID corto, aparecer en un lector de OTRA sede es mezclar a dos personas.
+    ajenas = [ip for ip in ips_configuradas() if ip not in propias]
+    if ajenas and not es_dni_real(p.get("dni")):
+        with DB_LOCK:
+            conn = conectar_db()
+            try:
+                marcas = ",".join("?" * len(ajenas))
+                fila = conn.execute(
+                    f"SELECT 1 FROM sincronizacion WHERE sede = ? AND dni = ? AND estado = ? "
+                    f"AND equipo IN ({marcas}) LIMIT 1", (sede, p.get("dni"), ESTADO_OK, *ajenas)).fetchone()
+            finally:
+                conn.close()
+        if fila:
+            return True
+    return False
+
+
+def enviar_a_odoo(sede, dni, reactivar=True, simular=False, estricto=False):
+    """Manda UNA persona del panel a Odoo. Solo Odoo: no re-encola nada en los lectores."""
+    with DB_LOCK:
+        conn = conectar_db()
+        try:
+            p = conn.execute("SELECT nombre, tipo, turno, activo, odoo_estado, odoo_campos "
+                             "FROM personas WHERE sede = ? AND dni = ?", (sede, dni)).fetchone()
+        finally:
+            conn.close()
+    if not p:
+        return {"ok": False, "odoo_id": None, "accion": "error", "dni": dni, "nombre": "",
+                "detalle": "la persona no existe en el panel"}
+    if not p["activo"]:
+        return {"ok": False, "odoo_id": None, "accion": "error", "dni": dni, "nombre": p["nombre"],
+                "detalle": "esta dada de baja en el panel"}
+    # Lo que quedo sin escribir de un alta o edicion que fallo se escribe ahora
+    ok, odoo_id, accion, detalle = ODOO_EMPLEADOS.asegurar_empleado(
+        dni, p["nombre"], p["tipo"], p["turno"], campo_lector=campo_lector_de(sede), reactivar=reactivar,
+        actualizar=campos_pendientes(dict(p)), simular=simular, estricto=estricto)
+    if not simular:
+        marcar_odoo(sede, dni, ok, odoo_id, accion, detalle)
+    return {"ok": ok, "odoo_id": odoo_id, "accion": accion, "detalle": detalle,
+            "dni": dni, "nombre": p["nombre"]}
+
+
+def _odoo_caido(r):
+    return r["accion"] == "error" and str(r["detalle"]).startswith("no se pudo conectar")
+
+
+def enviar_pendientes_odoo(sede, simular, aprobados=None, reactivar_aprobados=()):
+    """El boton 'Enviar faltantes a Odoo'. Con simular=True solo dice que haria.
+
+    Al confirmar se hace EXACTAMENTE lo que se mostro: solo las personas de la
+    simulacion (`aprobados`) y solo se reactiva a las que se listaron por nombre
+    (`reactivar_aprobados`). Si entre la simulacion y la confirmacion alguien paso a
+    estar de baja en Odoo, no se lo reactiva: queda como 'baja'.
+    Devuelve None si ya hay otro envio masivo en curso."""
+    if not ENVIO_ODOO_LOCK.acquire(blocking=False):
+        return None
+    aprobados = None if aprobados is None else {str(d) for d in aprobados}
+    reactivar_aprobados = {str(d) for d in reactivar_aprobados or ()}
+    try:
+        res = {"crear": [], "vincular": [], "reactivar": [], "baja": [], "sin_dni": [], "conflicto": [],
+               "revisar": [], "error": []}
+        pendientes = [p for p in personas_sin_odoo(sede)
+                      if simular or aprobados is None or p["dni"] in aprobados]   # solo lo confirmado
+        sin_procesar = 0
+        for i, p in enumerate(pendientes):
+            if es_dudosa(p):
+                res["revisar"].append({"dni": p["dni"], "nombre": p["nombre"],
+                                       "detalle": "importado sin datos seguros: revisalo y mandalo de a uno"})
+                continue
+            reactivar = simular or p["dni"] in reactivar_aprobados
+            r = enviar_a_odoo(p["sede"], p["dni"], reactivar=reactivar, simular=simular, estricto=True)
+            res[r["accion"] if r["accion"] in res else "error"].append(
+                {"dni": p["dni"], "nombre": p["nombre"], "detalle": r["detalle"]})
+            if _odoo_caido(r):
+                # sin Odoo no tiene sentido seguir: se informa cuantos quedaron sin tocar
+                sin_procesar = len(pendientes) - i - 1
+                break
+        if not simular:
+            logging.info(f"Odoo (boton, sede {sede}): " +
+                         ", ".join(f"{k}={len(v)}" for k, v in res.items() if v) +
+                         (f", sin_procesar={sin_procesar}" if sin_procesar else ""))
+        return {**res, "sin_procesar": sin_procesar}
+    finally:
+        ENVIO_ODOO_LOCK.release()
+
+
+def _reingreso_urgente(p):
+    """Un reingreso que no se reactivo SOLO porque Odoo no contesto: corre contra
+    la primera marca de la persona, asi que se reintenta cada minuto. Si Odoo
+    contesto y dijo que no (conflicto, sin DNI, un rechazo), apurarse no sirve:
+    sigue con el espaciado comun y se reactiva cuando alguien lo resuelva."""
+    if not p.get("odoo_reactivar"):
+        return False
+    estado, error = p.get("odoo_estado"), str(p.get("odoo_error") or "")
+    # Una clave rechazada tampoco se arregla sola, y cada login fallido suma al
+    # freno por IP de Odoo: va con el espaciado comun (cada 15 min)
+    return not estado or (estado == "error" and error.startswith("no se pudo conectar")
+                          and "rechazo el usuario o la api key" not in error)
+
+
+def _toca_reintentar(p):
+    """Espaciado del reintento automatico: lo nunca intentado va ya; un error cada
+    15 min (cada 6 h despues de 5 fallos); de baja o sin DNI, una vez por dia, porque
+    eso no se arregla solo: lo tiene que resolver alguien."""
+    estado, cuando = p.get("odoo_estado"), p.get("odoo_actualizado")
+    if not estado or not cuando or _reingreso_urgente(p):
+        return True
+    if estado == "error":
+        minutos = 15 if (p.get("odoo_intentos") or 0) < 5 else 360
+    else:
+        minutos = 1440
+    try:
+        return datetime.now() - datetime.strptime(cuando, "%Y-%m-%d %H:%M:%S") >= timedelta(minutes=minutos)
+    except ValueError:
+        return True
+
+
+def worker_odoo():
+    """Que la gente activa del panel termine en Odoo aunque el alta haya fallado,
+    la hayan importado de los lectores o se haya cargado antes de existir esto.
+    Crea y vincula; a los dados de baja NO los reactiva solo (eso vuelve a poner a
+    alguien en nomina): quedan marcados para que RRHH use el boton."""
+    intervalo = int(PANEL.get("odoo_reintento_minutos", 15)) * 60
+    STOP.wait(30)                        # que arranque lo demas primero
+    while not STOP.is_set():
+        espera = intervalo
+        try:
+            cuenta = {}
+            pendientes = personas_sin_odoo()
+            # Los reingresos sin reactivar van primero y, mientras quede alguno, el
+            # ciclo es de 1 minuto: corren contra la primera fichada de la persona.
+            pendientes.sort(key=lambda p: not p.get("odoo_reactivar"))
+            for p in pendientes:
+                if STOP.is_set():
+                    break
+                if es_dudosa(p):
+                    continue
+                if _reingreso_urgente(p):
+                    espera = 60
+                if not _toca_reintentar(p):
+                    continue
+                # Solo un reingreso que alguien ya aprobo (y no se pudo hacer porque
+                # Odoo no contesto) se reactiva solo.
+                r = enviar_a_odoo(p["sede"], p["dni"], reactivar=bool(p.get("odoo_reactivar")),
+                                  estricto=True)
+                cuenta[r["accion"]] = cuenta.get(r["accion"], 0) + 1
+                if _odoo_caido(r):
+                    break
+                STOP.wait(1)
+            if cuenta:
+                logging.info("Odoo (automatico): " + ", ".join(f"{k}={v}" for k, v in sorted(cuenta.items())))
+        except Exception:
+            logging.exception("Error en el envio automatico a Odoo")
+        HAY_TRABAJO_ODOO.wait(timeout=espera)
+        HAY_TRABAJO_ODOO.clear()
+    logging.info("Envio automatico a Odoo finalizado")
 
 # La foto en los ZKTeco no se puede mandar por el protocolo directo: hay que
 # encolarla como comando y el lector la retira cuando se conecta al servidor
@@ -1753,10 +2708,15 @@ def guardar_huella(dni, sede, huella):
     return h
 
 
-def respaldar_huellas(solo_dni=None):
+def respaldar_huellas(solo_dni=None, sede=None):
     """
     Recorre las personas y se trae del lector las huellas que tengan cargadas.
     Es solo lectura sobre los equipos: no modifica nada.
+
+    Por (sede, dni): el mismo ID en las dos sedes son dos personas distintas, y
+    agrupando solo por el ID la huella de una terminaba guardada en la otra.
+    Con solo_dni (antes de corregirle el ID a alguien) se lee de todo lector donde
+    PUEDE estar, no solo de los 'ok': un alta con la foto rechazada igual la creo.
     """
     with DB_LOCK:
         conn = conectar_db()
@@ -1764,29 +2724,32 @@ def respaldar_huellas(solo_dni=None):
             sql = """
                 SELECT p.dni, p.sede, p.nombre, s.equipo
                 FROM personas p
-                JOIN sincronizacion s ON s.dni = p.dni AND s.sede = p.sede AND s.estado = ?
+                JOIN sincronizacion s ON s.dni = p.dni AND s.sede = p.sede
+                     AND (s.estado = ? OR (? AND s.estado != ? AND NOT (s.accion = ? AND s.estado = ?)))
                 WHERE p.activo = 1
             """
-            args = [ESTADO_OK]
+            args = [ESTADO_OK, bool(solo_dni), ESTADO_AUSENTE, ACCION_BAJA, ESTADO_OK]
             if solo_dni:
                 sql += " AND p.dni = ? "
                 args.append(solo_dni)
+            if sede:
+                sql += " AND p.sede = ? "
+                args.append(sede)
             filas = conn.execute(sql, args).fetchall()
         finally:
             conn.close()
 
-    # Por persona, los equipos donde esta cargada
+    # Por persona (sede, dni), los equipos donde esta cargada
     donde = {}
     nombres = {}
-    sedes_de = {}
     for f in filas:
-        donde.setdefault(f["dni"], []).append(f["equipo"])
-        nombres[f["dni"]] = f["nombre"]
-        sedes_de[f["dni"]] = f["sede"]
+        clave = (f["sede"] or SEDE_POR_DEFECTO, f["dni"])
+        donde.setdefault(clave, []).append(f["equipo"])
+        nombres[clave] = f["nombre"]
 
     con_huella = 0
     sin_huella = 0
-    for dni, equipos in donde.items():
+    for (sede_p, dni), equipos in donde.items():
         if STOP.is_set():
             break
         huella = None
@@ -1798,10 +2761,10 @@ def respaldar_huellas(solo_dni=None):
             if huella:
                 break
         if huella:
-            guardar_huella(dni, sedes_de.get(dni, SEDE_POR_DEFECTO), huella)
+            guardar_huella(dni, sede_p, huella)
             con_huella += 1
             logging.info(
-                f"Huella respaldada | {dni} {nombres.get(dni, '')} | "
+                f"Huella respaldada | {sede_p} {dni} {nombres.get((sede_p, dni), '')} | "
                 f"{huella['cantidad']} huella(s), {len(huella['datos'])} bytes"
             )
         else:
@@ -1902,13 +2865,18 @@ def worker_sincronizacion():
                 break
             ok, msg = aplicar_tarea(t)
             if ok:
+                # Despues de una baja el lector no tiene ni foto ni huella de la persona
+                sale = t["accion"] == ACCION_BAJA
                 actualizar_sync(t["dni"], t["sede"], t["equipo"], ESTADO_OK,
-                                foto_hash=t["foto_hash"], huella_hash=t["huella_hash"])
+                                foto_hash=None if sale else t["foto_hash"],
+                                huella_hash=None if sale else t["huella_hash"],
+                                accion=t["accion"])
                 logging.info(f"{t['accion'].upper()} OK | {t['dni']} {t.get('nombre','')} -> {t['equipo']}")
             else:
                 # Si el lector esta caido no se cuenta como error: se reintenta igual
                 estado = ESTADO_PENDIENTE if "desconectado" in msg else ESTADO_ERROR
-                actualizar_sync(t["dni"], t["sede"], t["equipo"], estado, error=msg)
+                actualizar_sync(t["dni"], t["sede"], t["equipo"], estado, error=msg,
+                                accion=t["accion"])
                 nivel = logging.INFO if estado == ESTADO_PENDIENTE else logging.WARNING
                 logging.log(nivel, f"{t['accion']} {t['dni']} -> {t['equipo']}: {msg}")
 
@@ -2050,7 +3018,11 @@ def importar_zkteco(clave_sede):
                             INSERT INTO sincronizacion (sede, dni, equipo, accion, estado, actualizado)
                             VALUES (?, ?, ?, ?, ?, ?)
                             ON CONFLICT(sede, dni, equipo) DO UPDATE SET
-                                estado = excluded.estado, actualizado = excluded.actualizado
+                                -- igual que importar_de_lectores: una baja que no termino
+                                estado = CASE WHEN sincronizacion.accion = 'baja'
+                                               AND excluded.estado = 'ok'
+                                              THEN 'pendiente' ELSE excluded.estado END,
+                                actualizado = excluded.actualizado
                         """, (clave_sede, dni, otro, ACCION_ALTA, estado, ahora_txt()))
                     conn.commit()
                 finally:
@@ -2165,7 +3137,13 @@ def importar_de_lectores(sede=None):
                 # (es justamente la diferencia entre los 3 lectores de fijos).
                 # Donde no le toca -> ausente, no se toca el equipo.
                 le_tocan = lectores_de_tipo(tipo) if tipo else []
+                fila_p = cr.execute("SELECT activo FROM personas WHERE sede = ? AND dni = ?",
+                                    (SEDE_POR_DEFECTO, dni)).fetchone()
+                activa = bool(fila_p and fila_p["activo"])
                 for ip, existe in presencias.items():
+                    # Activa y en un lector que le toca: ahi va un alta (aunque el panel
+                    # estuviera a mitad de un cambio de tipo)
+                    suya = activa and ip in le_tocan
                     if existe:
                         estado = ESTADO_OK
                     elif ip in le_tocan:
@@ -2176,9 +3154,26 @@ def importar_de_lectores(sede=None):
                     cr.execute("""
                         INSERT INTO sincronizacion (sede, dni, equipo, accion, estado, actualizado)
                         VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(sede, dni, equipo) DO UPDATE SET estado = ?, actualizado = ?
+                        ON CONFLICT(sede, dni, equipo) DO UPDATE SET
+                            -- El panel pidio sacarla de ahi y sigue estando: la baja no
+                            -- termino (fallo o estaba en cola). Se vuelve a pedir, en vez
+                            -- de darla por hecha: si no, se la podia eliminar del panel
+                            -- con la persona todavia cargada en el lector.
+                            -- Donde no esta, o si venia de una baja (quiza en vuelo en el
+                            -- lote del worker), el lector no tiene su cara ni su huella: que
+                            -- el alta las vuelva a subir. Una baja (hecha, en cola o en
+                            -- vuelo) nunca se da por 'ok' desde aca: queda pendiente.
+                            foto_hash = CASE WHEN ? OR (? AND sincronizacion.accion = 'baja')
+                                             THEN NULL ELSE sincronizacion.foto_hash END,
+                            huella_hash = CASE WHEN ? OR (? AND sincronizacion.accion = 'baja')
+                                               THEN NULL ELSE sincronizacion.huella_hash END,
+                            accion = CASE WHEN ? THEN 'alta' ELSE sincronizacion.accion END,
+                            estado = CASE WHEN sincronizacion.accion = 'baja'
+                                           AND excluded.estado = 'ok'
+                                          THEN 'pendiente' ELSE excluded.estado END,
+                            actualizado = excluded.actualizado
                     """, (SEDE_POR_DEFECTO, dni, ip, ACCION_ALTA, estado, ahora_txt(),
-                          estado, ahora_txt()))
+                          not existe, suya, not existe, suya, suya))
                 conn.commit()
             finally:
                 conn.close()
@@ -2347,6 +3342,7 @@ class Handler(BaseHTTPRequestHandler):
                     "capacidades": sd.get("capacidades") or {},
                     "lectores": ips_de_sede_persona(clave),
                     "disponible": True if sd.get("tecnologia") != "zkteco" else ZKTECO_OK,
+                    "odoo": sede_odoo(clave),
                 }
             return self._json({"equipos": equipos, "grupos": grupos, "sedes": sedes,
                                "sede_por_defecto": SEDE_POR_DEFECTO, "resumen": resumen()})
@@ -2358,6 +3354,19 @@ class Handler(BaseHTTPRequestHandler):
             q = params.get("q", [""])[0]
             sede = params.get("sede", [""])[0] or None
             return self._json({"personas": listar_personas(q, sede)})
+
+        if ruta == "/api/registrados":
+            # Para la vista de "Registrados" del monitoreo (entra por su puente)
+            if not self._autorizado():
+                return self._json({"error": "no autorizado"}, 401)
+            params = parse_qs(urlparse(self.path).query)
+            sede = (params.get("sede", [""])[0] or "").strip()
+            if sede not in SEDES:
+                return self._json({"error": "Elegí una sede válida"}, 400)
+            try:
+                return self._json(listar_registrados(sede, {k: v[0] for k, v in params.items()}))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
 
         if ruta.startswith("/api/foto/"):
             if not self._autorizado():
@@ -2475,33 +3484,99 @@ class Handler(BaseHTTPRequestHandler):
             if turno and turno not in TURNOS:
                 return self._json({"error": "El turno tiene que ser dia o noche"}, 400)
 
-            guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto,
-                            (datos.get("observaciones") or "").strip(),
-                            forzar_foto=bool(foto))
-            logging.info(f"Alta/edicion desde el panel: {dni} {nombre} "
-                         f"(sede {sede}, {tipo or 'sin tipo'}, turno {turno or '-'})")
-
             # Alta en Odoo: si falla, la persona igual queda cargada en los
             # lectores y el aviso dice que reviso Odoo.
             # Odoo solo para las sedes que lo tengan habilitado. Lavalle todavia
             # no se configura del lado de Odoo, pero si se carga en el lector.
-            aviso_odoo = ""
-            if sede_de(sede).get("odoo", True):
-                ok_odoo, odoo_id, msg_odoo = ODOO_EMPLEADOS.guardar_empleado(dni, nombre, tipo, turno)
+            # Si estaba dada de baja en Odoo se la reactiva (no se crea otra ficha),
+            # pero SOLO en un alta nueva o un reingreso: editar la foto de alguien
+            # activo no puede deshacer una baja que RRHH hizo en Odoo.
+            # Va ANTES de cargarla en los lectores: si no, puede fichar antes de que
+            # Odoo la reactive y el alta automatica de las marcas le crea otra ficha.
+            previa = persona_por_dni(dni, sede)
+            cambio_dni = bool(editando) and dni != editando
+            reingreso = (previa is None or not previa["activo"]) and not cambio_dni
+            con_odoo = bool(sede_de(sede).get("odoo", True))
+            vieja = (persona_por_dni(editando, sede) or {}) if cambio_dni else {}
+            if (cambio_dni and vieja.get("activo") and caps.get("foto") and not foto
+                    and not foto_puesta_en_lectores(editando, sede)):
+                # Corregir el ID saca al usuario anterior de los lectores, y con el su
+                # cara. Si el panel no tiene una foto que ya este puesta en sus lectores
+                # (la gente importada no tiene ninguna; otra pudo ser rechazada por el
+                # lector), quedaria sin poder fichar: hay que cargarle una foto.
+                return self._json({"error": f"Para corregirle el ID hay que cargarle una foto: la cara "
+                                            f"que usa hoy está en el lector con el {editando} y se borra "
+                                            f"al pasarla al {dni}."}, 409)
+            if cambio_dni:
+                # Con ficha en Odoo, el DNI se corrige primero alla (si no, dos fichas)
+                rechazo = revisar_cambio_dni(sede, editando, dni, vieja)
+                if rechazo:
+                    return self._json({"error": rechazo[1]}, rechazo[0])
+            # Un reingreso que quedo aprobado (Odoo no contesto) sigue valiendo si
+            # despues se la edita: si no, quedaba de baja en Odoo y su primera marca
+            # le creaba otra ficha
+            reactivar_odoo = reingreso or bool((previa or {}).get("odoo_reactivar"))
+            campos = set()
+            if not con_odoo:
+                ok_odoo, odoo_id, accion_odoo, msg_odoo = True, None, "", ""
             else:
-                ok_odoo, odoo_id, msg_odoo = True, None, ""
-            if ok_odoo and odoo_id:
-                with DB_LOCK:
-                    conn = conectar_db()
-                    try:
-                        conn.execute("UPDATE personas SET odoo_id = ? WHERE sede = ? AND dni = ?",
-                                     (odoo_id, sede, dni))
-                        conn.commit()
-                    finally:
-                        conn.close()
-            elif not ok_odoo:
+                # Que datos del panel se escriben en una ficha de Odoo que ya existe:
+                # en un alta nueva, todos; si la persona ya estaba en el panel (una
+                # edicion o un reingreso), SOLO lo que cambio: si no, editar la foto
+                # pisaria el turno o el tipo que cargo RRHH, y volver a dar de alta a
+                # alguien importado (turno vacio, nombre del lector sin tildes) le
+                # pasaria el turno noche a dia. Un turno vacio que el formulario manda
+                # como 'dia' no es un cambio. En un reingreso el tipo va siempre: el
+                # formulario obliga a elegirlo. Se suma lo que quedo sin escribir de
+                # un intento anterior que fallo.
+                # (con un cambio de DNI se compara con la fila del DNI anterior)
+                base = previa if previa is not None else (vieja or None)
+                if base is None:
+                    campos = {"tipo", "turno", "nombre"}
+                else:
+                    campos = {"tipo"} if reingreso else set()
+                    if (base.get("tipo") or "") != (tipo or ""):
+                        campos.add("tipo")
+                    if base.get("nombre") != nombre:
+                        campos.add("nombre")
+                    turno_previo = base.get("turno") or ""
+                    if turno_previo != (turno or "") and not (not turno_previo and turno == "day"):
+                        campos.add("turno")
+                    campos |= campos_pendientes(base)
+                ok_odoo, odoo_id, accion_odoo, msg_odoo = ODOO_EMPLEADOS.asegurar_empleado(
+                    dni, nombre, tipo, turno, campo_lector=campo_lector_de(sede),
+                    reactivar=reactivar_odoo, actualizar=campos)
+
+            if cambio_dni and vieja.get("activo") and caps.get("huella"):
+                # La huella enrolada en el lector viaja con la fila nueva: se respalda
+                # antes de sacar al usuario anterior (si no estaba respaldada, se perdia)
+                try:
+                    respaldar_huellas(solo_dni=editando, sede=sede)
+                except Exception:
+                    logging.warning(f"No se pudo respaldar la huella de {editando} antes del cambio de ID",
+                                    exc_info=True)
+            guardar_persona(dni, nombre, sede, tipo, turno, desde, hasta, foto,
+                            (datos.get("observaciones") or "").strip(),
+                            forzar_foto=bool(foto), heredar_de=editando if cambio_dni and vieja else None)
+            logging.info(f"Alta/edicion desde el panel: {dni} {nombre} "
+                         f"(sede {sede}, {tipo or 'sin tipo'}, turno {turno or '-'})")
+            if cambio_dni and vieja and vieja.get("activo"):
+                # Corregir el DNI es mudar a la persona, no sumar otra: el usuario
+                # anterior se saca de los lectores. Si quedaban los dos, fichaba con
+                # cualquiera de los dos y en Odoo terminaba con dos fichas.
+                marcar_baja(editando, sede)
+                logging.info(f"Cambio de DNI en {sede}: {editando} -> {dni} (el anterior se da de baja)")
+
+            aviso_odoo = ""
+            if con_odoo:
+                marcar_odoo(sede, dni, ok_odoo, odoo_id, accion_odoo, msg_odoo)
+            if not ok_odoo:
                 aviso_odoo = msg_odoo
                 logging.warning(f"Odoo: no se pudo dar de alta a {dni}: {msg_odoo}")
+                # Lo que no llego a Odoo queda anotado y lo termina el envio automatico;
+                # un reingreso con Odoo caido se reactiva en el minuto
+                if con_odoo:
+                    odoo_pendiente(sede, dni, campos, reactivar=reactivar_odoo and accion_odoo == "error")
 
             # En Lavalle la foto viaja como comando: el lector la retira cuando
             # se conecta al servidor ADMS.
@@ -2521,6 +3596,41 @@ class Handler(BaseHTTPRequestHandler):
                                "odoo": msg_odoo if ok_odoo else "",
                                "aviso": aviso_odoo, "foto": aviso_foto})
 
+        if ruta == "/api/odoo/enviar":
+            # Una persona: si no esta en Odoo la crea, si estaba de baja la reactiva
+            dni = str(datos.get("dni") or "").strip()
+            sede = (datos.get("sede") or SEDE_POR_DEFECTO).strip()
+            if not dni or sede not in SEDES:
+                return self._json({"error": "Falta el DNI o la sede"}, 400)
+            if not sede_odoo(sede):
+                return self._json({"error": "Esta sede no da de alta en Odoo"}, 400)
+            p = persona_por_dni(dni, sede)
+            if p and capacidades(sede).get("tipos", True) and not p.get("tipo"):
+                # Sin tipo se crearia como fijo, y la mitad de las veces es eventual
+                return self._json({"error": "Elegí si es de planta fija o eventual (Editar) "
+                                            "antes de mandarla a Odoo"}, 409)
+            r = enviar_a_odoo(sede, dni, reactivar=True)
+            if not r["ok"]:
+                return self._json({"error": r["detalle"]},
+                                  409 if r["accion"] in ("sin_dni", "baja", "conflicto") else 502)
+            return self._json(r)
+
+        if ruta == "/api/odoo/pendientes":
+            # Todos los que faltan. Con simular=true solo dice que haria (para confirmar)
+            sede = (datos.get("sede") or SEDE_POR_DEFECTO).strip()
+            if sede not in SEDES or not sede_odoo(sede):
+                return self._json({"error": "Esta sede no da de alta en Odoo"}, 400)
+            simular = bool(datos.get("simular"))
+            # Al confirmar, el navegador manda lo que se aprobo en la simulacion
+            aprobados = datos.get("aprobados")
+            if not simular and not isinstance(aprobados, list):
+                return self._json({"error": "Falta la lista aprobada: volvé a apretar el botón"}, 400)
+            res = enviar_pendientes_odoo(sede, simular, aprobados=aprobados,
+                                         reactivar_aprobados=datos.get("reactivar") or [])
+            if res is None:
+                return self._json({"error": "Ya hay un envío a Odoo en curso, esperá a que termine"}, 409)
+            return self._json({"ok": True, "simulado": simular, **res})
+
         if ruta == "/api/baja":
             dni = solo_digitos(datos.get("dni"))
             if not dni:
@@ -2528,6 +3638,17 @@ class Handler(BaseHTTPRequestHandler):
             marcar_baja(dni, (datos.get("sede") or SEDE_POR_DEFECTO).strip())
             logging.info(f"Baja desde el panel: {dni}")
             return self._json({"ok": True})
+
+        if ruta == "/api/eliminar":
+            # Borrar del panel a gente DADA DE BAJA (vista "Registrados" del
+            # monitoreo). eliminar_personas decide a quien si y a quien no.
+            sede = str(datos.get("sede") or "").strip()
+            dnis = datos.get("dnis")
+            if sede not in SEDES:
+                return self._json({"error": "Elegí una sede válida"}, 400)
+            if not isinstance(dnis, list) or not dnis or len(dnis) > 1000:
+                return self._json({"error": "Falta la lista de personas a eliminar"}, 400)
+            return self._json({"ok": True, **eliminar_personas(sede, dnis)})
 
         if ruta == "/api/reintentar":
             with DB_LOCK:
@@ -2919,6 +4040,9 @@ PAGINA = r"""<!doctype html>
     border: 1px solid var(--borde); border-radius: var(--radio);
     box-shadow: var(--sombra-alta);
     width: min(100%, 430px); padding: 26px 26px 22px;
+    /* Con un texto largo (una lista de reactivaciones) scrollea el texto y los
+       botones quedan siempre a la vista */
+    max-height: calc(100vh - 40px); display: flex; flex-direction: column;
     transform: translateY(10px) scale(.97);
     transition: transform .24s cubic-bezier(.16,1,.3,1);
   }
@@ -2938,8 +4062,10 @@ PAGINA = r"""<!doctype html>
   }
   #velo p {
     margin: 0 0 22px; font-size: 14.5px; line-height: 1.55;
-    color: var(--texto-2);
+    color: var(--texto-2); white-space: pre-line;
+    overflow-y: auto; min-height: 0;
   }
+  #velo .simbolo, #velo h3, #velo .botones { flex: none; }
   #velo .botones { display: flex; gap: 10px; justify-content: flex-end; }
   #velo .botones button { min-width: 116px; }
   #velo .btn-peligro { background: var(--alerta); color: var(--peligro-texto); border-color: transparent; }
@@ -3126,6 +4252,7 @@ PAGINA = r"""<!doctype html>
         <button class="btn-2 btn-chico" onclick="importar()">Importar</button>
         <button class="btn-2 btn-chico" id="btnHuellas" onclick="respaldarHuellas()">Respaldar huellas</button>
         <button class="btn-2 btn-chico" onclick="reintentar()">Reintentar</button>
+        <button class="btn-2 btn-chico oculto" id="btnOdoo" onclick="enviarFaltantesOdoo()">Enviar faltantes a Odoo</button>
         <div class="resumen" id="resumen"></div>
       </div>
       <div class="personas" id="lista"></div>
@@ -3224,8 +4351,17 @@ function avisar(texto, mal) {
    Devuelve una promesa con true o false. Reemplaza al confirm() del navegador,
    que anunciaba "192.168.1.100 dice" y a la gente le resultaba sospechoso.
    Enter NO se intercepta a proposito: lo maneja el boton que tenga el foco, y
-   en lo destructivo el foco arranca en Cancelar. */
+   en lo destructivo el foco arranca en Cancelar.
+   Van en cola: uno que se abre tarde (el del envio masivo, cuando termina la
+   simulacion) espera a que se cierre el que este abierto, en vez de pisarlo y
+   llevarse el clic que era para el otro. */
+var COLA_PREGUNTAS = Promise.resolve();
 function preguntar(op) {
+  var turno = COLA_PREGUNTAS.then(function () { return abrirPregunta(op); });
+  COLA_PREGUNTAS = turno.catch(function () {});
+  return turno;
+}
+function abrirPregunta(op) {
   var velo = document.getElementById("velo");
   var si = document.getElementById("velo-si");
   var no = document.getElementById("velo-no");
@@ -3242,6 +4378,7 @@ function preguntar(op) {
   return new Promise(function (resolver) {
     function cerrar(respuesta) {
       velo.className = "";
+      si.disabled = false;
       si.onclick = null;
       no.onclick = null;
       velo.onmousedown = null;
@@ -3261,7 +4398,9 @@ function preguntar(op) {
     no.onclick = function () { cerrar(false); };
     velo.onmousedown = function (ev) { if (ev.target === velo) cerrar(false); };
     document.addEventListener("keydown", teclas, true);
-    setTimeout(function () { (op.peligro ? no : si).focus(); }, 40);
+    // Un doble clic en lo de atras no tiene que confirmar el cuadro que aparece
+    si.disabled = true;
+    setTimeout(function () { si.disabled = false; (op.peligro ? no : si).focus(); }, 350);
   });
 }
 
@@ -3368,6 +4507,11 @@ function capacidadesSede() {
   return (SEDES[SEDE] && SEDES[SEDE].capacidades) || {};
 }
 
+// La sede da de alta en Odoo (Deposito si; Lavalle todavia no)
+function odooSede() {
+  return !!(SEDES[SEDE] && SEDES[SEDE].odoo);
+}
+
 function aplicarCapacidades() {
   var c = capacidadesSede();
   var bt = document.getElementById("bloqueTipo"), bf = document.getElementById("bloqueFoto");
@@ -3382,6 +4526,8 @@ function aplicarCapacidades() {
   if (info && !FOTO && !(prev && prev.getAttribute("src"))) info.textContent = textoAyudaFoto();
   var bh = document.getElementById("btnHuellas");
   if (bh) bh.classList.toggle("oculto", !c.huella);
+  var bo = document.getElementById("btnOdoo");
+  if (bo) bo.classList.toggle("oculto", !odooSede());
   // Lavalle no tiene turno noche: se oculta el selector y queda en dia
   var btu = document.getElementById("bloqueTurno");
   if (btu) btu.classList.toggle("oculto", c.turnos === false);
@@ -3677,6 +4823,23 @@ function tagsLectores(p) {
            escapar(ip.split(".").pop()) + "</span>";
   }).join("");
 }
+function tagOdoo(p) {
+  // Si la persona quedo dada de alta en Odoo. Sin vincular no quiere decir que
+  // no exista alla: 'Enviar a Odoo' la busca antes de crear.
+  if (!odooSede() || !p.activo) return "";
+  var motivo = escapar(p.odoo_error || "todavía no se envió");
+  if (p.odoo_estado === "baja") return '<span class="tag espera" title="' + motivo + '">Odoo: de baja</span>';
+  if (p.odoo_estado === "sin_dni") return '<span class="tag mal" title="' + motivo + '">sin DNI para Odoo</span>';
+  if (p.odoo_estado === "conflicto") return '<span class="tag mal" title="' + motivo + '">Odoo: revisar</span>';
+  // Vinculada, pero el ultimo cambio no llego: lo termina el envio automatico
+  if (odooPendiente(p))
+    return '<span class="tag espera" title="' + motivo + '">Odoo: pendiente</span>';
+  if (p.odoo_id) return '<span class="tag ok">en Odoo</span>';
+  return '<span class="tag mal" title="' + motivo + '">sin Odoo</span>';
+}
+function odooPendiente(p) {
+  return !!p.odoo_id && (p.odoo_estado === "error" || !!p.odoo_campos || !!p.odoo_reactivar);
+}
 
 function cargar() {
   var q = document.getElementById("buscar").value;
@@ -3691,10 +4854,13 @@ function cargar() {
             (p.activo ? "" : ' <span class="tag mal">baja</span>') + "</div>" +
           '<div class="persona-dni">' + (capacidadesSede().dni === false ? "ID " : "DNI ") +
             escapar(p.dni) + "</div>" +
-          '<div class="persona-tags">' + tagTipo(p) + tagTurno(p) + tagFoto(p) + tagHuella(p) + tagsLectores(p) + "</div>" +
+          '<div class="persona-tags">' + tagTipo(p) + tagTurno(p) + tagFoto(p) + tagHuella(p) + tagOdoo(p) + tagsLectores(p) + "</div>" +
           '<div class="persona-acciones">' +
             (capacidadesSede().huella
                ? '<button class="btn-2 btn-chico" data-accion="huella" data-dni="' + escapar(p.dni) + '" data-nombre="' + escapar(p.nombre) + '">Tomar huella</button>'
+               : "") +
+            (odooSede() && p.activo && (!p.odoo_id || odooPendiente(p))
+               ? '<button class="btn-2 btn-chico" data-accion="odoo" data-dni="' + escapar(p.dni) + '" data-nombre="' + escapar(p.nombre) + '">Enviar a Odoo</button>'
                : "") +
             '<button class="btn-2 btn-chico" data-accion="editar" data-dni="' + escapar(p.dni) + '">Editar</button>' +
             '<button class="btn-2 btn-chico" data-accion="baja" data-dni="' + escapar(p.dni) + '" data-nombre="' + escapar(p.nombre) + '">Baja</button>' +
@@ -3792,6 +4958,104 @@ function reintentar() {
     .catch(function (e) { avisar(e.message, true); });
 }
 
+/* ---------- Odoo ---------- */
+// Una persona: si no esta en Odoo se crea; si estaba dada de baja se la reactiva.
+function enviarOdoo(dni, nombre) {
+  preguntar({
+    titulo: "Enviar a Odoo",
+    texto: "Se busca a " + nombre + " en Odoo. Si ya está, queda vinculada; si estaba dada "
+         + "de baja, se la reactiva; si no existe, se la crea.",
+    ok: "Enviar"
+  }).then(function (si) {
+    if (!si) return;
+    api("/api/odoo/enviar", {method: "POST", body: JSON.stringify({sede: SEDE, dni: dni})})
+      .then(function (j) { avisar(nombre + ": " + j.detalle); cargar(); })
+      .catch(function (e) { avisar(e.message, true); cargar(); });
+  });
+}
+
+function listaNombres(items, max) {
+  var n = items.map(function (x) { return x.nombre + " (" + x.dni + ")"; });
+  return n.slice(0, max).join(", ") + (n.length > max ? " y " + (n.length - max) + " más" : "");
+}
+// Reactivar vuelve a poner a alguien en nomina: se listan TODOS, con el nombre que
+// tiene la ficha en Odoo, para ver que sea la misma persona.
+function listaReactivar(items) {
+  return items.map(function (x) {
+    var odoo = x.detalle && x.detalle !== x.nombre ? " → en Odoo: " + x.detalle : "";
+    return "   " + x.nombre + " (" + x.dni + ")" + odoo;
+  }).join("\n");
+}
+
+// Todos los que faltan. Primero se SIMULA y se muestra que va a pasar: reactivar
+// a alguien lo vuelve a poner en nomina, asi que se lista por nombre.
+function enviarFaltantesOdoo() {
+  var bo = document.getElementById("btnOdoo");
+  bo.disabled = true;
+  // La sede de la revision: si mientras tanto se cambia de sede, se confirma igual
+  // sobre la que se reviso, no sobre la nueva
+  var sede = SEDE;
+  var nombreSede = (SEDES[sede] || {}).nombre || sede;
+  avisar("Revisando en Odoo quiénes faltan…");
+  api("/api/odoo/pendientes", {method: "POST", body: JSON.stringify({sede: sede, simular: true})})
+    .then(function (p) {
+      var hacer = p.crear.length + p.reactivar.length + p.vincular.length;
+      if (!hacer && !p.sin_dni.length && !p.error.length && !p.conflicto.length && !p.revisar.length) {
+        avisar("Están todos en Odoo");
+        return;
+      }
+      var lineas = [];
+      if (p.crear.length) lineas.push("• Se crean: " + p.crear.length);
+      if (p.reactivar.length) lineas.push("• Se reactivan (estaban dados de baja): " + p.reactivar.length
+                                          + "\n" + listaReactivar(p.reactivar));
+      if (p.vincular.length) lineas.push("• Ya estaban en Odoo, solo se vinculan: " + p.vincular.length);
+      if (p.sin_dni.length) lineas.push("• No se crean porque su ID no es un DNI real: " + p.sin_dni.length
+                                        + " — " + listaNombres(p.sin_dni, 5));
+      if (p.conflicto.length) lineas.push("• No se tocan, tienen datos cruzados en Odoo (revisar): "
+                                          + p.conflicto.length + " — " + listaNombres(p.conflicto, 5));
+      if (p.revisar.length) lineas.push("• Importados sin datos seguros, no se mandan solos: "
+                                        + p.revisar.length + " — " + listaNombres(p.revisar, 5));
+      if (p.error.length) lineas.push("• No se pudieron revisar: " + p.error.length
+                                      + " (" + p.error[0].detalle + ")");
+      if (p.sin_procesar) lineas.push("• Sin revisar, Odoo dejó de responder: " + p.sin_procesar);
+      if (!hacer) {
+        avisar(lineas.join(" "), true);
+        return;
+      }
+      return preguntar({
+        titulo: "Enviar " + hacer + " persona(s) de " + nombreSede + " a Odoo",
+        texto: lineas.join("\n"),
+        ok: "Enviar",
+        // reactivar vuelve a poner gente en nomina: el foco arranca en Cancelar
+        peligro: p.reactivar.length > 0
+      }).then(function (si) {
+        if (!si) return;
+        avisar("Enviando a Odoo…");
+        // Se manda EXACTAMENTE lo que se mostro: nadie fuera de esta lista se toca,
+        // y solo se reactiva a los que se listaron por nombre.
+        var dnis = function (l) { return l.map(function (x) { return x.dni; }); };
+        var cuerpo = {sede: sede, simular: false,
+                      aprobados: dnis(p.crear).concat(dnis(p.vincular), dnis(p.reactivar)),
+                      reactivar: dnis(p.reactivar)};
+        return api("/api/odoo/pendientes", {method: "POST", body: JSON.stringify(cuerpo)})
+          .then(function (r) {
+            var hecho = [];
+            if (r.crear.length) hecho.push(r.crear.length + " creados");
+            if (r.reactivar.length) hecho.push(r.reactivar.length + " reactivados");
+            if (r.vincular.length) hecho.push(r.vincular.length + " vinculados");
+            if (r.baja.length) hecho.push(r.baja.length + " quedaron de baja (cambiaron en Odoo desde la revisión)");
+            if (r.conflicto.length) hecho.push(r.conflicto.length + " para revisar");
+            if (r.error.length) hecho.push(r.error.length + " con error (" + r.error[0].detalle + ")");
+            if (r.sin_procesar) hecho.push(r.sin_procesar + " sin enviar porque Odoo dejó de responder: "
+                                           + "volvé a apretar el botón");
+            avisar("Odoo: " + (hecho.join(", ") || "sin cambios"), r.error.length > 0 || r.sin_procesar > 0);
+          });
+      });
+    })
+    .catch(function (e) { avisar(e.message, true); })
+    .then(function () { bo.disabled = false; cargar(); });
+}
+
 /* ---------- captura de huella ---------- */
 function tomarHuella(dni, nombre) {
   CAPTURA_ACTIVA = dni;
@@ -3862,6 +5126,7 @@ document.getElementById("lista").addEventListener("click", function (ev) {
   if (a === "editar") editar(b.dataset.dni);
   else if (a === "baja") baja(b.dataset.dni, b.dataset.nombre);
   else if (a === "huella") tomarHuella(b.dataset.dni, b.dataset.nombre);
+  else if (a === "odoo") enviarOdoo(b.dataset.dni, b.dataset.nombre);
 });
 
 document.getElementById("clave").addEventListener("keydown", function (e) {
@@ -4018,6 +5283,8 @@ def main():
     reconciliar_lectores()
 
     hilos = [threading.Thread(target=worker_sincronizacion, name="Sync", daemon=True)]
+    if ODOO_EMPLEADOS.enabled:
+        hilos.append(threading.Thread(target=worker_odoo, name="Odoo", daemon=True))
     for dev in DEVICES:
         DEV_STATE[dev["ip"]] = {"conectado": False, "login_id": None, "disconnect": threading.Event()}
         hilos.append(threading.Thread(target=hilo_lector, args=(dev,), name=f"Lector-{dev['ip']}", daemon=True))
@@ -4033,6 +5300,7 @@ def main():
     finally:
         STOP.set()
         HAY_TRABAJO.set()
+        HAY_TRABAJO_ODOO.set()
         for st in DEV_STATE.values():
             st["disconnect"].set()
         servidor.shutdown()
