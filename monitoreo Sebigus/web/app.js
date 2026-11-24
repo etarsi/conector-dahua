@@ -25,6 +25,9 @@ const estado = {
   asisPagina: 0,       // página actual del log de asistencias (server-side)
   regsPagina: 0,       // página actual de Registrados (server-side)
   regsIniciado: false, // la primera vez Registrados arranca en "hoy"
+  histPagina: 0,       // página actual del historial de puertas (server-side)
+  histIniciado: false, // la primera vez el Historial arranca en "hoy"
+  hoy: { asis: false, regs: false, hist: false },   // se eligió "Hoy" (sigue al calendario)
   usuariosPagina: 0,   // página actual de la tabla de usuarios (client-side)
 };
 
@@ -46,6 +49,8 @@ function pintarPaginador(cont, pagina, hayMas, onIr, extra = "") {
 }
 const PAG_ASIS = 50;         // fichadas por página
 const PAG_REGS = 48;         // registrados por página
+const PAG_HIST = 100;        // marcas de puertas por página
+const METODO_PANEL = "Abrió desde el panel";   // aperturas remotas (base.METODO_PANEL)
 const PAG_USUARIOS = 20;     // usuarios por página
 const TOPE_FEED = 200;
 
@@ -252,7 +257,7 @@ async function cambiarSede(sede, inicial = false) {
   pintarFeed();
   if (vistaActiva() === "asistencias") recargarAsis();
   if (vistaActiva() === "registrados") recargarRegs();
-  if (vistaActiva() === "historial") cargarHistorial();
+  if (vistaActiva() === "historial") recargarHistorial();
   if (vistaActiva() === "camaras") cargarCamaras();
 }
 
@@ -281,7 +286,11 @@ function irA(vista) {
     recargarAsis();
   }
   autoRefrescoAsistencias(vista === "asistencias");
-  if (vista === "historial") cargarHistorial();
+  if (vista === "historial") {
+    // La primera vez arranca en HOY; después respeta lo elegido (también "todas").
+    if (!estado.histIniciado) { ponerHoy("hist"); estado.histIniciado = true; }
+    recargarHistorial();
+  }
   if (vista === "registro") abrirRegistro();
   if (vista === "registrados") {
     // La primera vez arranca en HOY (los nuevos del día); después respeta lo elegido.
@@ -403,14 +412,29 @@ document.addEventListener("click", async (ev) => {
 });
 
 // ---------------------------------------------------------------- eventos en vivo (SSE)
+let ultimoChequeoSesion = 0;
 function conectarStream() {
   if (estado.fuente) estado.fuente.close();
   const fuente = new EventSource("/api/stream");
   estado.fuente = fuente;
   fuente.onopen = () => { $("#conexion").className = "conexion viva";
     $("#conexion").innerHTML = '<span class="latido"></span> en vivo'; };
-  fuente.onerror = () => { $("#conexion").className = "conexion caida";
-    $("#conexion").innerHTML = '<span class="latido"></span> reconectando…'; };
+  fuente.onerror = () => {
+    $("#conexion").className = "conexion caida";
+    $("#conexion").innerHTML = '<span class="latido"></span> reconectando…';
+    // Si la sesión se cerró (la desactivaron, le cambiaron la clave, venció o se
+    // reinició el panel) el canal no vuelve más: en vez de quedar "reconectando…"
+    // para siempre con datos viejos, se pide entrar de nuevo.
+    const cerrado = fuente.readyState === EventSource.CLOSED;
+    if (!cerrado && Date.now() - ultimoChequeoSesion < 10000) return;
+    ultimoChequeoSesion = Date.now();
+    const reintentar = (ms) => setTimeout(() => { if (estado.fuente === fuente) conectarStream(); }, ms);
+    fetch("/api/sesion").then((r) => r.json()).then((s) => {
+      if (estado.fuente !== fuente) return;              // ya hay otro canal
+      if (!s.abierta) { mostrarLogin(); avisar("Tu sesión se cerró: volvé a entrar", "mal"); }
+      else if (cerrado) reintentar(5000);
+    }).catch(() => { if (cerrado) reintentar(10000); });   // sin red: probar más tarde
+  };
   fuente.onmessage = (msg) => {
     let p; try { p = JSON.parse(msg.data); } catch { return; }
     const suSede = p.sede;
@@ -423,7 +447,8 @@ function conectarStream() {
     } else if (suSede === estado.sede && p.tipo === "resumen") {
       pintarMetricas(p.datos);
     } else if (suSede === estado.sede && p.tipo === "apertura") {
-      avisar(`Apertura remota: ${p.datos.lector}`);
+      avisar(`Apertura remota: ${p.datos.lector}${p.datos.quien ? ` (por ${p.datos.quien})` : ""}`);
+      if (vistaActiva() === "historial") cargarHistorial();
     } else if (suSede === estado.sede && p.tipo === "foto") {
       // llegó la foto de una fichada: si estoy mirando Asistencias, refresco
       if (vistaActiva() === "asistencias") programarAsis();
@@ -697,22 +722,45 @@ let asisTimer = null;
 const programarAsis = () => { clearTimeout(asisTimer); asisTimer = setTimeout(cargarAsistencias, 500); };
 
 const fechaHoyLocal = () => new Date().toLocaleDateString("en-CA");   // YYYY-MM-DD local
-function ponerHoyAsis() {
+
+// "Hoy" que sigue al calendario. Si se eligió Hoy (o se entró y arrancó en hoy) y la
+// pestaña queda abierta de un día para el otro, al recargar pasa sola al día nuevo:
+// si no, a la mañana RRHH veía el día anterior y parecía que nadie había fichado.
+// Tocar las fechas a mano lo apaga; el botón Hoy queda marcado mientras sigue.
+const RANGOS = {
+  asis: ["#filtro-desde-asis", "#filtro-hasta-asis", "#btn-hoy-asis"],
+  regs: ["#filtro-desde-regs", "#filtro-hasta-regs", "#btn-hoy-regs"],
+  hist: ["#filtro-desde-hist", "#filtro-hasta-hist", "#btn-hoy-hist"],
+};
+function ponerHoy(clave) {
+  const [desde, hasta, boton] = RANGOS[clave];
   const h = fechaHoyLocal();
-  $("#filtro-desde-asis").value = h;
-  $("#filtro-hasta-asis").value = h;
+  $(desde).value = h; $(hasta).value = h;
+  estado.hoy[clave] = true;
+  $(boton).classList.add("activo");
 }
+function salirDeHoy(clave) {
+  estado.hoy[clave] = false;
+  $(RANGOS[clave][2]).classList.remove("activo");
+}
+// Si está en modo Hoy y cambió el día, mueve las fechas. Devuelve true si las movió.
+function alDiaDeHoy(clave) {
+  if (!estado.hoy[clave] || $(RANGOS[clave][0]).value === fechaHoyLocal()) return false;
+  ponerHoy(clave);
+  return true;
+}
+const ponerHoyAsis = () => ponerHoy("asis");
 
 const recargarAsis = () => { estado.asisPagina = 0; cargarAsistencias(); };
 
 async function cargarAsistencias() {
   const gen = estado.generacion;
+  if (alDiaDeHoy("asis")) estado.asisPagina = 0;
   // Se pide una de más para saber si hay página siguiente sin contar el total.
   const params = new URLSearchParams({ limite: String(PAG_ASIS + 1),
                                        offset: String(estado.asisPagina * PAG_ASIS) });
   if ($("#buscar-asis").value) params.set("q", $("#buscar-asis").value);
   if ($("#filtro-lector-asis").value) params.set("lector", $("#filtro-lector-asis").value);
-  if ($("#filtro-tipo-asis") && $("#filtro-tipo-asis").value) params.set("tipo", $("#filtro-tipo-asis").value);
   // Por defecto se ocultan las fichadas "sin permiso" (caras no reconocidas): son ruido.
   const resultado = $("#filtro-resultado-asis").value;
   if (resultado === "no") params.set("rechazos", "1");
@@ -720,10 +768,15 @@ async function cargarAsistencias() {
   const desde = $("#filtro-desde-asis").value, hasta = $("#filtro-hasta-asis").value;
   if (desde) params.set("desde", Math.floor(new Date(`${desde}T00:00:00`).getTime() / 1000));
   if (hasta) params.set("hasta", Math.floor(new Date(`${hasta}T23:59:59`).getTime() / 1000));
-  let marcas;
-  try { marcas = await apiSede(`/asistencias?${params}`); }
-  catch (e) { avisar(e.message, "mal"); return; }
+  let marcas, estadoFich = null;
+  try {
+    [marcas, estadoFich] = await Promise.all([
+      apiSede(`/asistencias?${params}`),
+      apiSede("/asistencias/estado").catch(() => null),   // si falla, la lista igual se muestra
+    ]);
+  } catch (e) { avisar(e.message, "mal"); return; }
   if (gen !== estado.generacion) return;
+  pintarEstadoFichadores(estadoFich);
   const hayMas = marcas.length > PAG_ASIS;      // vino la de más: hay página siguiente
   marcas = marcas.slice(0, PAG_ASIS);
   // Si la página quedó vacía por borrado/filtro (y no es la primera), retroceder.
@@ -746,12 +799,25 @@ async function cargarAsistencias() {
   });
 }
 
-// Entrada/Salida: badge según la dirección que reporta el fichador.
-function badgeTipo(t) {
-  const v = (t || "").toLowerCase();
-  if (v === "entry" || v === "entrada") return '<span class="etiqueta ok">entrada</span>';
-  if (v === "exit" || v === "salida") return '<span class="etiqueta">salida</span>';
-  return "";
+// Cómo salió la última lectura de cada fichador. Sin esto, un fichador que no
+// contestaba se veía igual que uno donde nadie fichó (lista vacía, sin aviso).
+function horaCorta(ts) {
+  const d = new Date(ts * 1000);
+  const hora = d.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return d.toLocaleDateString("en-CA") === fechaHoyLocal()
+    ? hora : `${d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" })} ${hora}`;
+}
+function pintarEstadoFichadores(r) {
+  const cont = $("#estado-fich");
+  const lista = (r && r.fichadores) || [];
+  cont.innerHTML = lista.map((f) => {
+    if (f.error) {
+      const desde = f.error_desde ? ` desde ${horaCorta(f.error_desde)}` : "";
+      return `<span class="chip-fich mal" title="${escapar(f.error)}">${escapar(f.nombre)} · sin respuesta${desde}</span>`;
+    }
+    if (!f.ok_ts) return `<span class="chip-fich">${escapar(f.nombre)} · todavía sin leer</span>`;
+    return `<span class="chip-fich ok">${escapar(f.nombre)} · leído ${horaCorta(f.ok_ts)}</span>`;
+  }).join("");
 }
 
 function tarjetaAsistencia(e) {
@@ -770,7 +836,6 @@ function tarjetaAsistencia(e) {
       <span class="asis-meta">${escapar(fecha)} · ${escapar(hora)}${e.metodo ? " · " + escapar(e.metodo) : ""}</span>
     </div>
     <div class="asis-resultado">
-      ${badgeTipo(e.tipo)}
       ${e.concedido ? "" : `<span class="etiqueta error">${escapar(e.motivo || "rechazado")}</span>`}
     </div>
   </div>`;
@@ -778,10 +843,9 @@ function tarjetaAsistencia(e) {
 
 $("#buscar-asis").addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(recargarAsis, 250); });
 $("#filtro-lector-asis").addEventListener("change", recargarAsis);
-$("#filtro-tipo-asis").addEventListener("change", recargarAsis);
 $("#filtro-resultado-asis").addEventListener("change", recargarAsis);
-$("#filtro-desde-asis").addEventListener("change", recargarAsis);
-$("#filtro-hasta-asis").addEventListener("change", recargarAsis);
+$("#filtro-desde-asis").addEventListener("change", () => { salirDeHoy("asis"); recargarAsis(); });
+$("#filtro-hasta-asis").addEventListener("change", () => { salirDeHoy("asis"); recargarAsis(); });
 $("#btn-hoy-asis").addEventListener("click", () => { ponerHoyAsis(); recargarAsis(); });
 
 // Ver la foto de una fichada en grande
@@ -812,7 +876,10 @@ $("#btn-traer-marcas").addEventListener("click", async (ev) => {
   ev.target.disabled = true; const t = ev.target.textContent; ev.target.textContent = "Trayendo…";
   try {
     const r = await apiSede("/asistencias/sincronizar", { method: "POST", body: "{}" });
-    avisar(`${r.nuevas || 0} marca(s) nuevas`, "ok"); cargarAsistencias();
+    const fallaron = r.fallaron || [];
+    if (fallaron.length) avisar(`${r.nuevas || 0} marca(s) nuevas, pero no respondió: ${fallaron.join(", ")}`, "mal");
+    else avisar(`${r.nuevas || 0} marca(s) nuevas`, "ok");
+    cargarAsistencias();
   } catch (e) { avisar(e.message, "mal"); }
   finally { ev.target.disabled = false; ev.target.textContent = t; }
 });
@@ -830,11 +897,7 @@ function autoRefrescoAsistencias(on) {
 // en Odoo, y borrar a los dados de baja. Los datos son del panel de personas: el
 // server los trae por su puente, la sede la fija la URL.
 let regsTimer = null;
-function ponerHoyRegs() {
-  const h = fechaHoyLocal();
-  $("#filtro-desde-regs").value = h;
-  $("#filtro-hasta-regs").value = h;
-}
+const ponerHoyRegs = () => ponerHoy("regs");
 const recargarRegs = () => { estado.regsPagina = 0; cargarRegistrados(); };
 function limpiarRegs() {
   $("#lista-regs").innerHTML = ""; $("#contador-regs").textContent = "";
@@ -856,6 +919,7 @@ function filtrosRegs() {
 
 async function cargarRegistrados() {
   const gen = estado.generacion;
+  if (alDiaDeHoy("regs")) estado.regsPagina = 0;
   const params = filtrosRegs();
   params.set("limite", String(PAG_REGS));
   params.set("offset", String(estado.regsPagina * PAG_REGS));
@@ -1030,6 +1094,7 @@ $("#btn-eliminar-bajas").addEventListener("click", async (ev) => {
 $("#lista-regs").addEventListener("click", async (ev) => {
   if (ev.target.closest("[data-regs-todas]")) {
     $("#filtro-desde-regs").value = ""; $("#filtro-hasta-regs").value = "";
+    salirDeHoy("regs");
     recargarRegs();
     return;
   }
@@ -1060,46 +1125,82 @@ $("#resumen-regs").addEventListener("click", (ev) => {
 });
 
 $("#buscar-regs").addEventListener("input", () => { clearTimeout(regsTimer); regsTimer = setTimeout(recargarRegs, 250); });
-["#filtro-desde-regs", "#filtro-hasta-regs", "#filtro-tipo-regs", "#filtro-estado-regs", "#filtro-odoo-regs"]
+["#filtro-tipo-regs", "#filtro-estado-regs", "#filtro-odoo-regs"]
   .forEach((sel) => $(sel).addEventListener("change", recargarRegs));
+["#filtro-desde-regs", "#filtro-hasta-regs"]
+  .forEach((sel) => $(sel).addEventListener("change", () => { salirDeHoy("regs"); recargarRegs(); }));
 $("#btn-hoy-regs").addEventListener("click", () => { ponerHoyRegs(); recargarRegs(); });
 $("#btn-todas-regs").addEventListener("click", () => {
-  $("#filtro-desde-regs").value = ""; $("#filtro-hasta-regs").value = ""; recargarRegs();
+  $("#filtro-desde-regs").value = ""; $("#filtro-hasta-regs").value = "";
+  salirDeHoy("regs"); recargarRegs();
 });
 
 // ---------------------------------------------------------------- historial de accesos (puertas, texto, SIN foto)
+// Desde/Hasta y páginas: antes había solo "desde" y traía las 300 marcas más
+// nuevas, así que un día pasado mostraba lo de hoy y un día de Lavalle (570 a más
+// de 1.000 marcas) no entraba entero.
+const recargarHistorial = () => { estado.histPagina = 0; cargarHistorial(); };
+
 async function cargarHistorial() {
   const gen = estado.generacion;
-  const params = new URLSearchParams({ limite: "300" });
+  if (alDiaDeHoy("hist")) estado.histPagina = 0;
+  // Se pide una de más para saber si hay página siguiente sin contar el total.
+  const params = new URLSearchParams({ limite: String(PAG_HIST + 1),
+                                       offset: String(estado.histPagina * PAG_HIST) });
   if ($("#buscar-hist").value) params.set("q", $("#buscar-hist").value);
   if ($("#filtro-lector-hist").value) params.set("lector", $("#filtro-lector-hist").value);
   if ($("#filtro-rechazos-hist").checked) params.set("rechazos", "1");
-  const f = $("#filtro-fecha-hist").value;
-  if (f) params.set("desde", Math.floor(new Date(`${f}T00:00:00`).getTime() / 1000));
+  const desde = $("#filtro-desde-hist").value, hasta = $("#filtro-hasta-hist").value;
+  if (desde) params.set("desde", Math.floor(new Date(`${desde}T00:00:00`).getTime() / 1000));
+  if (hasta) params.set("hasta", Math.floor(new Date(`${hasta}T23:59:59`).getTime() / 1000));
   let ev;
   try { ev = await apiSede(`/eventos?${params}`); }
   catch (e) { avisar(e.message, "mal"); return; }
   if (gen !== estado.generacion) return;
+  const hayMas = ev.length > PAG_HIST;          // vino la de más: hay página siguiente
+  ev = ev.slice(0, PAG_HIST);
+  if (!ev.length && estado.histPagina > 0) { estado.histPagina--; return cargarHistorial(); }
   const val = $("#filtro-lector-hist").value;
   const ops = estado.lectores.map((l) => `<option value="${escapar(l.ip)}">${escapar(l.nombre)}</option>`).join("");
   $("#filtro-lector-hist").innerHTML = `<option value="">Todas las puertas</option>${ops}`;
   $("#filtro-lector-hist").value = val;
-  $("#contador-hist").textContent = `${ev.length} marca(s)`;
+  const base = estado.histPagina * PAG_HIST;
+  $("#contador-hist").textContent = ev.length
+    ? `${base + 1}–${base + ev.length}${hayMas ? " · hay más" : ""}` : "0 marcas";
+  // Las aperturas desde el panel quedan como una fila más: quién abrió y qué puerta.
+  const resultado = (e) => e.metodo === METODO_PANEL ? '<span class="etiqueta">apertura remota</span>'
+    : e.concedido ? '<span class="etiqueta ok">acceso</span>'
+    : `<span class="etiqueta error">${escapar(e.motivo || "rechazado")}</span>`;
   $("#tabla-historial").innerHTML = ev.length ? `
     <thead><tr><th>Cuándo</th><th>Persona</th><th>ID</th><th>Puerta</th><th>Método</th><th>Resultado</th></tr></thead>
     <tbody>${ev.map((e) => `<tr>
       <td class="num">${escapar(e.momento)}</td>
       <td>${escapar(e.nombre || "—")}</td><td class="num">${escapar(e.persona_id || "—")}</td>
       <td>${escapar(e.lector_nom || e.lector)}</td><td>${escapar(e.metodo || "—")}</td>
-      <td>${e.concedido ? '<span class="etiqueta ok">acceso</span>'
-        : `<span class="etiqueta error">${escapar(e.motivo || "rechazado")}</span>`}</td>
+      <td>${resultado(e)}</td>
     </tr>`).join("")}</tbody>`
     : '<tbody><tr><td><p class="vacio">No hay marcas para ese filtro.</p></td></tr></tbody>';
+  pintarPaginador($("#pag-hist"), estado.histPagina, hayMas, (p) => {
+    estado.histPagina = p; cargarHistorial();
+    $("#vista-historial").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
-$("#buscar-hist").addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(cargarHistorial, 250); });
-$("#filtro-lector-hist").addEventListener("change", cargarHistorial);
-$("#filtro-rechazos-hist").addEventListener("change", cargarHistorial);
-$("#filtro-fecha-hist").addEventListener("change", cargarHistorial);
+$("#buscar-hist").addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(recargarHistorial, 250); });
+$("#filtro-lector-hist").addEventListener("change", recargarHistorial);
+$("#filtro-rechazos-hist").addEventListener("change", recargarHistorial);
+["#filtro-desde-hist", "#filtro-hasta-hist"]
+  .forEach((sel) => $(sel).addEventListener("change", () => { salirDeHoy("hist"); recargarHistorial(); }));
+$("#btn-hoy-hist").addEventListener("click", () => { ponerHoy("hist"); recargarHistorial(); });
+
+// Al volver a mirar la pestaña (quedó abierta de un día para el otro), las vistas en
+// "Hoy" se ponen al día solas, sin esperar a que alguien toque algo.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  const v = vistaActiva();
+  const cargar = { asistencias: ["asis", cargarAsistencias], registrados: ["regs", cargarRegistrados],
+                   historial: ["hist", cargarHistorial] }[v];
+  if (cargar && estado.hoy[cargar[0]] && $(RANGOS[cargar[0]][0]).value !== fechaHoyLocal()) cargar[1]();
+});
 
 // ---------------------------------------------------------------- registrar asistencia
 // El registro reusa el panel de personas (backend probado: alta -> fichadores +

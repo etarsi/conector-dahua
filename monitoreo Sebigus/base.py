@@ -31,6 +31,7 @@ import secrets
 import shutil
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta
 
 import identidad
@@ -848,6 +849,22 @@ _INSERT_EVENTO = (
     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
 
+# Las aperturas desde el panel se guardan como una marca mas, con este metodo y el
+# nombre del usuario que abrio: asi quedan en el Historial (quien, cuando, que
+# puerta). No son marcas de personas: no cuentan en "marcas hoy".
+METODO_PANEL = "Abrió desde el panel"
+
+
+def guardar_apertura_panel(sede, lector_ip, lector_nom, quien):
+    """Registra una apertura remota hecha desde el panel. Devuelve True si entro."""
+    ts = int(time.time())
+    return guardar_evento({
+        "sede": sede, "ip": lector_ip, "lector": lector_nom, "recno": None, "id": "",
+        "pid": None, "nombre": quien, "ts": ts,
+        "momento": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"),
+        "metodo": METODO_PANEL, "concedido": True, "motivo": "", "foto": ""})
+
+
 def guardar_evento(evento, vivo=False):
     """Devuelve True si el evento es nuevo."""
     with _LOCK, conectar() as cx:
@@ -973,7 +990,7 @@ def purgar_capturas(dias):
 
 
 def listar_eventos(sede, limite=100, lector=None, pid=None, user_id=None,
-                   solo_rechazos=False, desde_ts=None, busqueda=""):
+                   solo_rechazos=False, desde_ts=None, busqueda="", hasta_ts=None, offset=0):
     sql = "SELECT * FROM eventos WHERE sede=?"
     parametros = [sede]
     if lector:
@@ -986,11 +1003,13 @@ def listar_eventos(sede, limite=100, lector=None, pid=None, user_id=None,
         sql += " AND concedido=0"
     if desde_ts:
         sql += " AND ts>=?"; parametros.append(int(desde_ts))
+    if hasta_ts:
+        sql += " AND ts<=?"; parametros.append(int(hasta_ts))
     if busqueda:
         sql += " AND (nombre LIKE ? OR persona_id LIKE ?)"
         parametros += [f"%{busqueda}%", f"%{busqueda}%"]
-    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
-    parametros.append(int(limite))
+    sql += " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?"
+    parametros += [int(limite), max(0, int(offset or 0))]
     with conectar() as cx:
         filas = []
         for f in cx.execute(sql, parametros).fetchall():
@@ -1165,7 +1184,8 @@ def resumen(sede, lectores_sede):
                 "SELECT COUNT(*) FROM accesos a JOIN personas p ON p.pid=a.pid"
                 " WHERE p.sede=? AND a.aviso!=''", (sede,)),
             "eventos_hoy": uno(
-                f"SELECT COUNT(*) FROM eventos WHERE sede=? AND ts>=?", (sede, int(hoy))),
+                f"SELECT COUNT(*) FROM eventos WHERE sede=? AND ts>=? AND metodo!=?",
+                (sede, int(hoy), METODO_PANEL)),
             "rechazos_hoy": uno(
                 f"SELECT COUNT(*) FROM eventos WHERE sede=? AND ts>=? AND concedido=0",
                 (sede, int(hoy))),
@@ -1336,6 +1356,12 @@ def actualizar_usuario(nombre_usuario, nombre=None, rol=None, activo=None, clave
     no se le puede bajar el rol ni desactivar.
     """
     u = str(nombre_usuario or "").lower()
+    # Antes de escribir nada: si no, una clave corta se rechazaba pero lo demas
+    # (rol, puertas...) ya habia quedado guardado y el aviso decia que fallo.
+    if clave and len(clave) < 4:
+        return False, "la clave debe tener al menos 4 caracteres"
+    if rol is not None and rol not in ROLES:
+        return False, "rol invalido"
     with _LOCK, conectar() as cx:
         fila = cx.execute("SELECT * FROM usuarios WHERE usuario=?", (u,)).fetchone()
         if not fila:

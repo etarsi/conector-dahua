@@ -152,7 +152,9 @@
       <div class="barra-filtros">
         <input type="search" id="buscar-hist" placeholder="Buscar persona o ID…">
         <select id="filtro-lector-hist"><option value="">Todas las puertas</option></select>
-        <input type="date" id="filtro-fecha-hist" title="Mostrar desde esta fecha">
+        <button class="boton chico" id="btn-hoy-hist">Hoy</button>
+        <label class="rango-fecha">Desde <input type="date" id="filtro-desde-hist"></label>
+        <label class="rango-fecha">Hasta <input type="date" id="filtro-hasta-hist"></label>
         <label class="check"><input type="checkbox" id="filtro-rechazos-hist"> Solo rechazos</label>
         <span class="crecer"></span>
         <span class="pastilla" id="contador-hist"></span>
@@ -160,6 +162,7 @@
       <div class="tabla-caja">
         <table class="tabla" id="tabla-historial"></table>
       </div>
+      <div class="paginador" id="pag-hist"></div>
     </section>
 
     <!-- ---------- Registrar asistencia (reusa el panel de personas, embebido sin login) ---------- -->
@@ -253,11 +256,6 @@
       <div class="barra-filtros">
         <input type="search" id="buscar-asis" placeholder="Buscar persona o ID…">
         <select id="filtro-lector-asis"><option value="">Todos los fichadores</option></select>
-        <select id="filtro-tipo-asis">
-          <option value="">Entrada y salida</option>
-          <option value="Entry">Solo entradas</option>
-          <option value="Exit">Solo salidas</option>
-        </select>
         <button class="boton chico" id="btn-hoy-asis">Hoy</button>
         <label class="rango-fecha">Desde <input type="date" id="filtro-desde-asis"></label>
         <label class="rango-fecha">Hasta <input type="date" id="filtro-hasta-asis"></label>
@@ -269,6 +267,7 @@
         <span class="crecer"></span>
         <span class="pastilla" id="contador-asis"></span>
       </div>
+      <div class="estado-fich" id="estado-fich"></div>
       <div class="lista-asistencias" id="lista-asistencias"></div>
       <div class="paginador" id="pag-asis"></div>
     </section>

@@ -139,6 +139,38 @@ def _login_ok(ip):
         _FALLOS.pop(ip, None)
 
 
+def refrescar_sesiones(nombre_usuario, cerrar=False, salvo=None):
+    """Aplica a las sesiones abiertas de ese usuario lo que dice la base AHORA.
+
+    La sesion guarda el rol, las secciones, las puertas y las sedes del momento
+    del login. Sin esto, desactivar a un portero o sacarle una puerta no tenia
+    efecto hasta que vencia su sesion (12 h) o se reiniciaba el servicio.
+    - el usuario ya no existe o esta inactivo -> se le cierran todas
+    - `cerrar` (p. ej. le cambiaron la clave) -> se le cierran todas, menos `salvo`
+    - si no -> se le actualizan rol, nombre, secciones, puertas y sedes (tambien a
+      `salvo`: el admin que se edita a si mismo ve sus cambios ya)
+    Las cerradas quedan marcadas "cerrada": el canal en vivo se corta solo por eso
+    (y no porque la sesion vencio de tiempo: ver _stream).
+    Devuelve cuantas sesiones cerro."""
+    u = str(nombre_usuario or "").lower()
+    datos = base.usuario(u)
+    cerradas = 0
+    with _SES_LOCK:
+        for token, s in list(SESIONES.items()):
+            if s.get("usuario") != u:
+                continue
+            if not datos or not datos["activo"] or (cerrar and token != salvo):
+                s["cerrada"] = True
+                SESIONES.pop(token, None)
+                cerradas += 1
+            else:
+                s.update(nombre=datos["nombre"], rol=datos["rol"], puertas=datos["puertas"],
+                         secciones=datos["secciones"], sedes=datos["sedes"])
+    if cerradas:
+        log.info("Se cerraron %d sesion(es) abiertas de '%s'", cerradas, u)
+    return cerradas
+
+
 def sesion_de(token):
     """Devuelve los datos de la sesion {usuario, nombre, rol} si el token es
     valido y no vencio; None si no."""
@@ -351,13 +383,21 @@ class Handler(BaseHTTPRequestHandler):
             datos = base.persona(sede, pid)
             return self._json(datos) if datos else self._error("no existe", 404)
         if seccion == "eventos":
+            try:
+                limite = min(max(int((params.get("limite") or ["100"])[0]), 1), 1000)
+                offset = max(int((params.get("offset") or ["0"])[0]), 0)
+                desde = int(params["desde"][0]) if params.get("desde") else None
+                hasta = int(params["hasta"][0]) if params.get("hasta") else None
+                pid = int(params["pid"][0]) if params.get("pid") else None
+            except ValueError:
+                return self._error("parametro invalido", 400)
             return self._json(base.listar_eventos(
-                sede, limite=int((params.get("limite") or ["100"])[0]),
+                sede, limite=limite, offset=offset,
                 lector=(params.get("lector") or [None])[0],
-                pid=int(params["pid"][0]) if params.get("pid") else None,
+                pid=pid,
                 user_id=(params.get("user_id") or [None])[0],
                 solo_rechazos=(params.get("rechazos") or ["0"])[0] == "1",
-                desde_ts=(params.get("desde") or [None])[0],
+                desde_ts=desde, hasta_ts=hasta,
                 busqueda=(params.get("q") or [""])[0]))
         if seccion == "asistencias" and len(resto) == 1:
             # El LOG de fichadas de los fichadores de asistencia (area aparte de las
@@ -373,6 +413,9 @@ class Handler(BaseHTTPRequestHandler):
                 desde_ts=(params.get("desde") or [None])[0],
                 hasta_ts=(params.get("hasta") or [None])[0],
                 busqueda=(params.get("q") or [""])[0]))
+        if seccion == "asistencias" and resto[1:] == ["estado"]:
+            # Ultima lectura de cada fichador: para avisar cual no contesta
+            return self._json({"fichadores": asistencia.estado_de(sede), "ahora": int(time.time())})
         if seccion == "asistencias" and len(resto) == 3 and resto[2] == "foto":
             try:
                 mid = int(resto[1])
@@ -573,6 +616,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        # La sesion con la que se abrio el canal (do_GET ya verifico que valga)
+        ses = sesion_de(self._token()) or {"cerrada": True}
         cola = nucleo.suscribir()
         try:
             self.wfile.write(b": conectado\n\n")
@@ -581,6 +626,16 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     mensaje = cola.get(timeout=20)
                 except queue.Empty:
+                    mensaje = None
+                # Si la sesion se CERRO (salio, la desactivaron o borraron, le
+                # cambiaron la clave) se corta el canal antes de mandar nada: si no, una
+                # pestaña abierta seguia recibiendo las marcas. Que la sesion venza por
+                # tiempo (12 h) no lo corta: la pantalla de En vivo o de portería que
+                # queda siempre abierta sigue mostrando, como antes, y lo que haga
+                # despues igual pide la sesion vigente.
+                if ses.get("cerrada"):
+                    break
+                if mensaje is None:
                     self.wfile.write(b": ping\n\n")
                     self.wfile.flush()
                     continue
@@ -590,6 +645,11 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             nucleo.desuscribir(cola)
+            # La respuesta no tiene largo: al terminar hay que cerrar la conexion para
+            # que el navegador se entere (con HTTP/1.1 y "keep-alive" quedaba esperando
+            # datos para siempre). Va al final: send_header("Connection", "keep-alive")
+            # lo vuelve a poner en False.
+            self.close_connection = True
 
     # ---------------- POST / DELETE ----------------
     def do_POST(self):
@@ -609,6 +669,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error("usuario o clave incorrectos", 401)
             _login_ok(ip)
             token = nueva_sesion(u)
+            # Si mientras se verificaba la clave un admin lo desactivo o le cambio los
+            # permisos, refrescar_sesiones no encontro esta sesion: se aplica ahora.
+            refrescar_sesiones(u["usuario"])
+            if sesion_de(token) is None:
+                return self._error("usuario o clave incorrectos", 401)
             log.info("Login OK: %s (%s) desde %s", u["usuario"], u["rol"], self.address_string())
             cuerpo = json.dumps({"ok": True, **u}).encode()
             self.send_response(200)
@@ -623,13 +688,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._error("sesion vencida", 401)
         if camino == "/api/salir":
             with _SES_LOCK:
-                SESIONES.pop(self._token(), None)
+                s = SESIONES.pop(self._token(), None)
+                if s:
+                    s["cerrada"] = True          # corta tambien su canal en vivo
             return self._json({"ok": True})
 
         # Cambiar la propia clave: cualquier usuario logueado.
         if camino == "/api/mi-clave":
             ok, error = base.cambiar_clave_propia(
                 self._sesion()["usuario"], datos.get("actual", ""), datos.get("nueva", ""))
+            if ok:
+                # Las otras sesiones con la clave vieja (otra PC, el celular) se cierran
+                refrescar_sesiones(self._sesion()["usuario"], cerrar=True, salvo=self._token())
             return self._json({"ok": True}) if ok else self._error(error, 400)
 
         # Gestion de usuarios: solo admin.
@@ -681,6 +751,10 @@ class Handler(BaseHTTPRequestHandler):
             puertas=self._puertas_validas(datos.get("puertas")),
             secciones=datos.get("secciones"),
             sedes=self._sedes_validas(datos.get("sedes")))
+        if ok:
+            # Lo que se cambio rige ya, no cuando venza su sesion. Si se le puso una
+            # clave nueva, se lo saca (salvo la sesion de quien esta editando).
+            refrescar_sesiones(objetivo, cerrar=bool(datos.get("clave")), salvo=self._token())
         return self._json({"ok": True}) if ok else self._error(error, 400)
 
     def _post_sede(self, sede, resto, datos):
@@ -700,7 +774,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if seccion == "asistencias" and len(resto) >= 2 and resto[1] == "sincronizar":
-            return self._json({"nuevas": asistencia.sincronizar_sede(sede)})
+            return self._json(asistencia.sincronizar_sede(sede))
 
         if seccion == "registrados":
             return self._registrados_post(sede, resto[1:], datos)
@@ -789,6 +863,8 @@ class Handler(BaseHTTPRequestHandler):
             if unquote(partes[1]) == self._sesion()["usuario"]:
                 return self._error("no te podes borrar a vos mismo", 400)
             ok, error = base.borrar_usuario(unquote(partes[1]))
+            if ok:
+                refrescar_sesiones(unquote(partes[1]))      # ya no existe: afuera
             return self._json({"ok": True}) if ok else self._error(error, 400)
         sede = partes[0]
         if not self._sede_valida(sede):
@@ -880,14 +956,23 @@ class Handler(BaseHTTPRequestHandler):
         equipo = nucleo.LECTORES.get(ip)
         if not equipo:
             return self._error("no existe ese lector", 404)
+        s = self._sesion() or {}
+        quien = s.get("nombre") or s.get("usuario") or "?"
         try:
             equipo.abrir_puerta()
         except Exception as exc:
-            log.error("No se pudo abrir %s: %s", ip, exc)
+            log.error("No se pudo abrir %s (pedido por '%s'): %s", ip, s.get("usuario"), exc)
             return self._error(str(exc), 502)
-        log.warning("APERTURA REMOTA de %s [%s] desde %s", ip, sede, self.address_string())
-        nucleo.difundir("apertura", {"lector": nucleo.ESTADO.get(ip, {}).get("nombre", ip),
-                                     "ip": ip, "momento": base.ahora()}, sede)
+        nombre_puerta = nucleo.ESTADO.get(ip, {}).get("nombre", ip)
+        log.warning("APERTURA REMOTA de %s [%s] por '%s' desde %s",
+                    ip, sede, s.get("usuario"), self.address_string())
+        # Queda en el Historial como una marca mas: quien abrio, que puerta y cuando
+        try:
+            base.guardar_apertura_panel(sede, ip, nombre_puerta, quien)
+        except Exception:
+            log.exception("No se pudo registrar la apertura de %s en el historial", ip)
+        nucleo.difundir("apertura", {"lector": nombre_puerta, "ip": ip, "quien": quien,
+                                     "momento": base.ahora()}, sede)
         return self._json({"ok": True})
 
 

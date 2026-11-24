@@ -26,6 +26,7 @@ import time
 
 import base
 import identidad
+import respaldo_panel
 from camaras import NVR
 from lector import (ErrorCredenciales, ErrorLector, ErrorSinRespuesta, Lector,
                     PadronInvalido, ResultadoIncierto)
@@ -1066,6 +1067,19 @@ def hilo_mantenimiento(cfg):
         try:
             destino = base.respaldar_auto(conservar)
             log.info("Respaldo automatico: %s", destino)
+        except Exception:
+            log.exception("Error en el respaldo de la base")
+        # El del panel de personas (huellas, vinculos con Odoo) va aparte: si falla
+        # uno, el otro igual se hace.
+        rp = cfg.get("respaldo_panel") or {}
+        if rp.get("activo", True):
+            try:
+                zip_panel = respaldo_panel.respaldar(dias=rp.get("dias", 14))
+                if zip_panel:
+                    log.info("Respaldo del panel de personas: %s", zip_panel)
+            except Exception:
+                log.exception("Error en el respaldo del panel de personas")
+        try:
             borrados = base.purgar_eventos(meses)
             if borrados:
                 log.info("Retencion: %d eventos viejos borrados (> %d meses)", borrados, meses)

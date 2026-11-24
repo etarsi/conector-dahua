@@ -31,6 +31,23 @@ DIAS_FOTO = 7            # solo se busca foto de marcas mas nuevas que esto (las
 PARAR = threading.Event()
 _ULTIMO_COUNT = {}       # ip -> ultimo getQuerySize visto (para no releer si no cambio)
 
+# Como salio la ultima lectura de cada fichador, para mostrarlo en Asistencias.
+# Sin esto, un fichador que no contestaba se veia igual que uno donde nadie ficho.
+# ip -> {"ok_ts": epoch de la ultima lectura buena, "error": "", "error_desde": epoch}
+ESTADO = {}
+_ESTADO_LOCK = threading.Lock()
+
+
+def _anotar(ip, error=None):
+    with _ESTADO_LOCK:
+        st = ESTADO.setdefault(ip, {"ok_ts": 0, "error": "", "error_desde": 0})
+        if error:
+            if not st["error"]:
+                st["error_desde"] = int(time.time())
+            st["error"] = str(error)[:160]
+        else:
+            st.update(ok_ts=int(time.time()), error="", error_desde=0)
+
 
 def iniciar(cfg, parar=None):
     """Arma los lectores de asistencia desde config.asistencia. Devuelve cuantos."""
@@ -94,7 +111,7 @@ def _foto_desde_disco(user_id, ts):
 
 def sincronizar_uno(ip):
     """Trae las marcas nuevas de un fichador y las guarda con su foto. Devuelve
-    cuantas marcas nuevas entraron."""
+    cuantas marcas nuevas entraron, o None si el fichador no se pudo leer."""
     l = LECTORES.get(ip)
     if not l:
         return 0
@@ -105,6 +122,7 @@ def sincronizar_uno(ip):
         log.debug("Asistencia: %s sin getQuerySize (%s)", l.nombre, str(exc)[:60])
         total = None
     if total is not None and _ULTIMO_COUNT.get(ip) == total:
+        _anotar(ip)                                    # contesto: no hay nada nuevo
         return 0
 
     desde = base.ultimo_recno_asistencia(ip)
@@ -112,7 +130,9 @@ def sincronizar_uno(ip):
         nuevas = l.marcas(desde_recno=desde)
     except Exception as exc:
         log.warning("Asistencia: no pude leer %s: %s", l.nombre, str(exc)[:80])
-        return 0
+        _anotar(ip, error=exc)
+        return None
+    _anotar(ip)
     if total is not None:
         _ULTIMO_COUNT[ip] = total
     if not nuevas:
@@ -142,10 +162,28 @@ def lectores_de(sede):
             if getattr(l, "_sede", "") == sede]
 
 
+def estado_de(sede):
+    """Como salio la ultima lectura de cada fichador de la sede:
+    [{ip, nombre, ok_ts, error, error_desde}] (ok_ts 0 = todavia no se leyo)."""
+    with _ESTADO_LOCK:
+        return [{"ip": ip, "nombre": l.nombre,
+                 **dict(ESTADO.get(ip) or {"ok_ts": 0, "error": "", "error_desde": 0})}
+                for ip, l in LECTORES.items() if getattr(l, "_sede", "") == sede]
+
+
 def sincronizar_sede(sede):
-    """Trae lo nuevo de todos los fichadores de una sede ahora. Devuelve el total."""
-    return sum(sincronizar_uno(ip) for ip, l in LECTORES.items()
-               if getattr(l, "_sede", "") == sede)
+    """Trae lo nuevo de todos los fichadores de una sede ahora.
+    Devuelve {"nuevas": total, "fallaron": [nombres de los que no se pudieron leer]}."""
+    nuevas, fallaron = 0, []
+    for ip, l in LECTORES.items():
+        if getattr(l, "_sede", "") != sede:
+            continue
+        n = sincronizar_uno(ip)
+        if n is None:
+            fallaron.append(l.nombre)
+        else:
+            nuevas += n
+    return {"nuevas": nuevas, "fallaron": fallaron}
 
 
 def reintentar_fotos_recientes(horas=3):

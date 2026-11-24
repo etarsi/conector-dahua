@@ -131,6 +131,7 @@
   },
   "backup_automatico": true,
   "backups_conservar": 14,
+  "respaldo_panel": {"activo": true, "dias": 14},
   "retencion_meses": 0,
   "guardar_fotos": true,
   "capturas_dias": 60,

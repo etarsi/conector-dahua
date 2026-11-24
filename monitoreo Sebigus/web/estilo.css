@@ -632,3 +632,16 @@ body:not(.sec-personas) .accion-personas { display: none !important; }
   .metrica { min-width: 0; flex: 1; padding: 8px 10px; }
   .acciones { width: 100%; margin-left: 0; }
 }
+
+/* Botón "Hoy" marcado mientras la vista sigue al día de hoy */
+.boton.chico.activo { border-color: var(--acento); color: var(--acento); }
+
+/* Asistencias: cómo salió la última lectura de cada fichador */
+.estado-fich { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 12px; }
+.estado-fich:empty { display: none; }
+.chip-fich {
+  font-size: 12px; padding: 3px 10px; border-radius: 20px;
+  border: 1px solid var(--borde-2); color: var(--tenue); background: var(--fondo-2);
+}
+.chip-fich.ok { color: var(--tenue); }
+.chip-fich.mal { color: var(--error); border-color: rgba(248,81,73,.4); background: var(--error-suave); }

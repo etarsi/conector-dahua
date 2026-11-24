@@ -113,6 +113,18 @@ def _agrupar_puertas(registro):
     return sorted(set(puertas))
 
 
+class _DigestAuth(urllib.request.HTTPDigestAuthHandler):
+    """El digest de urllib, pero probando la clave como mucho 2 veces por pedido
+    (urllib la prueba hasta 6). Con una clave mal, cada pedido le sumaba 6
+    intentos fallidos al equipo, que bloquea la cuenta. La 2da vez hace falta:
+    cubre el caso de que el equipo haya vencido el nonce entre medio."""
+
+    def http_error_auth_reqed(self, auth_header, host, req, headers):
+        if self.retried > 1:
+            raise urllib.error.HTTPError(req.full_url, 401, "digest auth failed", headers, None)
+        return super().http_error_auth_reqed(auth_header, host, req, headers)
+
+
 class Lector:
     def __init__(self, ip, usuario, clave, nombre=None, puerto=80, canal=1):
         self.ip = ip
@@ -127,8 +139,9 @@ class Lector:
         self._ep_archivo = None       # endpoint que funciono para bajar archivos (cache)
         gestor = urllib.request.HTTPPasswordMgrWithDefaultRealm()
         gestor.add_password(None, self.base, usuario, clave)
+        self._digest = _DigestAuth(gestor)
         self._op = urllib.request.build_opener(
-            urllib.request.HTTPDigestAuthHandler(gestor),
+            self._digest,
             urllib.request.HTTPBasicAuthHandler(gestor),
         )
 
@@ -139,15 +152,41 @@ class Lector:
     # ------------------------------------------------------------------
     # Transporte
     # ------------------------------------------------------------------
-    def _pedir(self, ruta, timeout=TIMEOUT, crudo=False):
-        url = self.base + ruta
+    def _abrir(self, url, timeout, credenciales_401=True):
+        """Abre la URL con autenticacion digest. Devuelve la respuesta abierta.
+
+        El handler digest de urllib cuenta los reintentos de autenticacion y solo
+        vuelve el contador a cero cuando un reintento sale bien. Si un pedido se
+        corta justo en el medio del login (timeout, red), el contador queda sumado;
+        a los 6 cortes, TODO pedido siguiente falla con "digest auth failed" sin
+        siquiera probar la clave, y el lector quedaba sin eventos ni boton Abrir
+        hasta reiniciar el servicio (pasó en septiembre con 4 lectores, de 4 a 15
+        dias). Por eso se arranca cada pedido con el contador en cero. La clave se
+        prueba a lo sumo 2 veces por pedido (_DigestAuth; la 2da cubre un nonce
+        vencido). Si igual da 401, es la clave: ErrorCredenciales, para que el
+        panel deje de insistir (la cuenta admin la comparte SmartPSS y el equipo
+        la bloquea por intentos fallidos).
+        """
         try:
             # El opener de urllib guarda estado del desafio digest, asi que dos
             # hilos pidiendo a la vez se pisan el nonce y el equipo responde 401.
             with self._lock:
-                respuesta = self._op.open(url, timeout=timeout)
+                self._digest.reset_retry_count()
+                return self._op.open(url, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and credenciales_401:
+                raise ErrorCredenciales(
+                    f"{self.nombre}: usuario o clave rechazados (HTTP 401)") from exc
+            raise
+
+    def _pedir(self, ruta, timeout=TIMEOUT, crudo=False, credenciales_401=True):
+        url = self.base + ruta
+        try:
+            respuesta = self._abrir(url, timeout, credenciales_401)
             with respuesta:
                 cuerpo = respuesta.read()
+        except ErrorLector:
+            raise
         except urllib.error.HTTPError as exc:
             raise ErrorLector(f"{self.nombre}: HTTP {exc.code} en {ruta.split('?')[0]}") from exc
         except (urllib.error.URLError, socket.timeout, OSError) as exc:
@@ -175,7 +214,10 @@ class Lector:
         ultimo = None
         for ep in orden:
             try:
-                datos = self._pedir(ep + ruta_absoluta, timeout=timeout, crudo=True)
+                # Estos equipos contestan 401 a RPC_Loadfile aun con la clave bien:
+                # ese 401 no quiere decir que la clave del lector este mal.
+                datos = self._pedir(ep + ruta_absoluta, timeout=timeout, crudo=True,
+                                    credenciales_401=False)
             except ErrorLector as exc:
                 ultimo = exc
                 continue
@@ -611,8 +653,16 @@ class Lector:
         Los guiones bajos son parte del nombre, no un error de tipeo.
         """
         ruta = (f"/cgi-bin/eventManager.cgi?action=attach&codes=[{codigos}]&heartbeat=5")
-        with self._lock:
-            respuesta = self._op.open(self.base + ruta, timeout=20)
+        # Mismos errores que _pedir: un corte de red es ErrorLector (una linea en el
+        # log) y no un traceback de 40 lineas; un 401 es ErrorCredenciales.
+        try:
+            respuesta = self._abrir(self.base + ruta, 20)
+        except ErrorLector:
+            raise
+        except urllib.error.HTTPError as exc:
+            raise ErrorLector(f"{self.nombre}: HTTP {exc.code} al abrir el stream de eventos") from exc
+        except (urllib.error.URLError, socket.timeout, OSError) as exc:
+            raise ErrorLector(f"{self.nombre}: sin respuesta ({exc})") from exc
         try:
             # 30s: mas del doble del heartbeat, asi una pausa normal no corta.
             respuesta.fp.raw._sock.settimeout(30)
